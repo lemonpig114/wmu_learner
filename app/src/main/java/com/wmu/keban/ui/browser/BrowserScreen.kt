@@ -48,12 +48,12 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * 内置浏览器(第一阶段:基础浏览)
+ * 内置浏览器：教务登录、会话复用及 PDF 下载。
  *
  * 安全边界:
- * - 不记录、不上传任何 URL、Cookie、凭据;不开启远程调试
+ * - 诊断仅在界面显示，不采集输入值、Cookie 值或正文；不开启远程调试
  * - 禁止 file:// / content:// 访问;拦截非 http(s) 协议跳转
- * - 下载与文件选择未启用:第三阶段按教务实际流程实现
+ * - 仅接收 PDF 下载，文件选择未启用
  */
 /** 教务课表查询页(与 JwxtClient.TIMETABLE_PAGE 对应,供浏览器默认打开) */
 private const val JWXT_TIMETABLE_PAGE =
@@ -78,8 +78,45 @@ fun BrowserScreen() {
     var browserMessage by remember { mutableStateOf<String?>(null) }
     var currentShownUrl by remember { mutableStateOf(JWXT_TIMETABLE_PAGE) }
     var diagText by remember { mutableStateOf<String?>(null) }
-    // UA 模式:0 伪装(默认,与参考项目一致) 1 桌面 2 原生
-    var uaMode by remember { mutableStateOf(0) }
+    val loadIssues = remember { mutableListOf<String>() }
+    val navHistory = remember { mutableListOf<String>() }
+    fun safeAddress(url: String?): String = runCatching {
+        val uri = android.net.Uri.parse(url.orEmpty())
+        "${uri.scheme}://${uri.host}${uri.path.orEmpty()}"
+    }.getOrDefault("(未知地址)")
+    /** 记录导航地址(已去除查询参数,避免把会话串写进诊断) */
+    fun recordNav(url: String?) {
+        val a = safeAddress(url)
+        if (a.isBlank() || navHistory.lastOrNull() == a) return
+        if (navHistory.size >= 12) navHistory.removeAt(0)
+        navHistory.add(a)
+    }
+    fun recordIssue(issue: String) {
+        if (loadIssues.size >= 20) loadIssues.removeAt(0)
+        loadIssues.add(issue)
+    }
+    fun sizeAuthFrame(view: WebView) {
+        val uri = android.net.Uri.parse(view.url.orEmpty())
+        if (uri.scheme != "https" || uri.host != JwxtClient.AUTH_SERVER_HOST ||
+            uri.path != "/authserver/login" || view.width <= 0 || view.height <= 0) return
+        // 此认证页在真机 WebView 中百分比高度坍缩：iframe 已加载但高度为 0。
+        // 按原生视口换算 CSS 像素，限定修复认证页的已知容器。
+        view.evaluateJavascript("""
+            (function(){
+              var f=document.getElementById('loginIframe');
+              if(!f) return;
+              var h=${view.height} * (window.innerWidth / ${view.width});
+              if(!(h>0)) return;
+              document.documentElement.style.height=h+'px';
+              document.body.style.height=h+'px';
+              f.style.display='block';
+              f.style.height=h+'px';
+              f.style.width='100%';
+            })()
+        """.trimIndent(), null)
+    }
+    // 默认原生 UA，让认证站点选择手机登录页；保留其他模式供对照。
+    var uaMode by remember { mutableStateOf(2) }
     val uaLabels = listOf("UA:伪装", "UA:桌面", "UA:原生")
     fun uaFor(mode: Int, base: String) = when (mode) {
         1 -> DESKTOP_UA
@@ -135,11 +172,16 @@ fun BrowserScreen() {
             currentShownUrl.contains("index_initMenu") ||
             currentShownUrl.contains("/jwglxt/") && !currentShownUrl.contains("login")
         val basic = buildString {
-            append("当前地址:${currentShownUrl}\n\n")
+            append("当前地址:${safeAddress(currentShownUrl)}\n\n")
             append("jwxt.wmu.edu.cn Cookie:${names(jwxt)}\n")
             append("authserver Cookie:${names(auth)}\n\n")
             append(if (loggedIn) "判断:看起来已进入教务内页(登录可能已成功)" else "判断:仍在登录相关页面(登录可能未完成)")
-            append("\n\n提示:只有出现 JSESSIONID 之类的教务会话 Cookie 才算登录成功。")
+            append("\n\n提示:Cookie 名称不能证明登录成功，需由教务服务端验证会话。")
+            append("\nWebView:${WebView.getCurrentWebViewPackage()?.versionName ?: "未知"}")
+            append("\n尺寸:${webView?.width} × ${webView?.height}")
+            append("\nUA:${webView?.settings?.userAgentString}")
+            append("\n\n最近加载问题:\n${loadIssues.joinToString("\n").ifBlank { "未捕获" }}")
+            append("\n\n最近访问(已去查询参数):\n${navHistory.joinToString("\n").ifBlank { "(无)" }}")
         }
         // 页面内容探针:evaluateJavascript 是异步的,不能写成同步函数返回值
         val w = webView
@@ -150,32 +192,54 @@ fun BrowserScreen() {
         val probe = """
             (function(){
               try{
-                var b = document.body;
-                var t = b ? (b.innerText || '') : '';
-                return JSON.stringify({
-                  title: document.title || '',
-                  ready: document.readyState || '',
-                  bodyChildren: b ? b.childElementCount : -1,
-                  htmlLen: document.documentElement ? document.documentElement.outerHTML.length : -1,
-                  textLen: t.length,
-                  text: t.replace(/\s+/g,' ').slice(0,300)
+                function info(d){
+                  var b=d.body;
+                  return {ready:d.readyState, textLen:b?(b.innerText||'').length:-1,
+                    forms:d.forms.length, inputs:d.querySelectorAll('input').length};
+                }
+                function layout(e){
+                  if(!e) return null;
+                  var r=e.getBoundingClientRect(), s=getComputedStyle(e);
+                  return {width:r.width,height:r.height,x:r.x,y:r.y,
+                    display:s.display,visibility:s.visibility,opacity:s.opacity};
+                }
+                var frames=Array.from(document.querySelectorAll('iframe')).map(function(f){
+                  var u; try{u=new URL(f.src,location.href); }catch(e){}
+                  var v={src:u?u.origin+u.pathname:'',layout:layout(f)};
+                  try{v.document=f.contentDocument?info(f.contentDocument):'不可访问';}
+                  catch(e){v.document='跨域不可访问';}
+                  return v;
                 });
+                // 导出入口证据:扫描本页及同源 iframe 的 HTML 结构,只取结构与属性,不取任何输入值
+                function scanExport(root){
+                  var h;
+                  try{ h=root.documentElement.outerHTML; }catch(e){ return null; }
+                  var out={onclick:[],kw:[],urls:[],forms:[]},seen={},m,r;
+                  function add(arr,v,cap){ v=(v||'').replace(/\s+/g,' ').trim(); if(v&&!seen[v]&&arr.length<cap){seen[v]=1;arr.push(v);} }
+                  seen={};
+                  r=/onclick="([^"]{0,140})"/gi;
+                  while((m=r.exec(h))!==null) add(out.onclick,m[1],18);
+                  seen={};
+                  r=/<[^<>]{0,260}?(?:导出|打印|下载|PDF|生成)[^<>]{0,200}?>/gi;
+                  while((m=r.exec(h))!==null) add(out.kw,m[0],12);
+                  seen={};
+                  r=/(\/jwglxt\/[A-Za-z0-9_\/.\-]{0,120})/g;
+                  while((m=r.exec(h))!==null) add(out.urls,m[1],25);
+                  r=/<form[^>]{0,300}>/gi;
+                  while((m=r.exec(h))!==null&&out.forms.length<5) out.forms.push(m[0].replace(/\s+/g,' '));
+                  return out;
+                }
+                return JSON.stringify({top:info(document),frames:frames,
+                  defaultForm:layout(document.getElementById('default')),
+                  export:scanExport(document)});
               }catch(e){ return JSON.stringify({error: String(e)}); }
             })()
         """.trimIndent()
         w.evaluateJavascript(probe) { raw ->
             val pretty = runCatching {
                 val obj = org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
-                buildString {
-                    append("\n\n【页面内容探针】\n")
-                    append("标题:${obj.optString("title").ifBlank { "(空)" }}\n")
-                    append("readyState:${obj.optString("ready")}\n")
-                    append("body 子元素:${obj.optInt("bodyChildren", -1)}\n")
-                    append("HTML 长度:${obj.optInt("htmlLen", -1)}\n")
-                    append("可见文本长度:${obj.optInt("textLen", -1)}\n")
-                    append("正文前 300 字:${obj.optString("text").ifBlank { "(空白页面)" }}")
-                }
-            }.getOrElse { "\n\n【页面内容探针】解析失败:${raw?.take(200)}" }
+                "\n\n【页面结构探针（含 iframe）】\n" + obj.toString(2)
+            }.getOrElse { "\n\n【页面结构探针】解析失败" }
             diagText = basic + pretty
         }
     }
@@ -261,6 +325,21 @@ fun BrowserScreen() {
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                TextButton(onClick = {
+                    val uri = android.net.Uri.parse(currentShownUrl)
+                    if (uri.scheme == "https" && uri.host == JwxtClient.AUTH_SERVER_HOST &&
+                        uri.path == "/authserver/login") {
+                        val fallback = uri.buildUpon().clearQuery()
+                        uri.queryParameterNames.filter { it != "dev" }.forEach { key ->
+                            uri.getQueryParameters(key).forEach { fallback.appendQueryParameter(key, it) }
+                        }
+                        currentUrl = fallback.appendQueryParameter("dev", "true").build().toString()
+                        webView?.loadUrl(currentUrl)
+                        lastRequested = currentUrl
+                    } else {
+                        browserMessage = "请先到达统一身份认证登录页，再切换简版登录"
+                    }
+                }) { Text("简版登录") }
                 Text(
                     currentShownUrl.takeLast(60),
                     style = MaterialTheme.typography.labelSmall,
@@ -300,9 +379,16 @@ fun BrowserScreen() {
                 }
             } else {
                 AndroidView(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            layoutParams = android.view.ViewGroup.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+                                sizeAuthFrame(view as WebView)
+                            }
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
                             settings.allowFileAccess = false
@@ -312,13 +398,14 @@ fun BrowserScreen() {
                             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                             // 登录页可能用 window.open / target=_blank 打开统一身份认证
                             settings.javaScriptCanOpenWindowsAutomatically = true
-                            settings.setSupportMultipleWindows(true)
+                            // 单窗口模式让 target=_blank / window.open 成为当前页导航。
+                            settings.setSupportMultipleWindows(false)
                             // 页面按宽度自适应,避免固定宽度登录页渲染成空白
                             settings.useWideViewPort = true
                             settings.loadWithOverviewMode = true
                             settings.textZoom = 100
-                            // UA 伪装(参考项目默认做法):规避教务对 Android/Mobile UA 的异常响应
-                            settings.userAgentString = uaFor(0, WebSettings.getDefaultUserAgent(ctx))
+                            // UA 与界面选择一致，默认使用原生手机 UA。
+                            settings.userAgentString = uaFor(uaMode, WebSettings.getDefaultUserAgent(ctx))
                             settings.setSupportZoom(true)
                             settings.builtInZoomControls = true
                             settings.displayZoomControls = false
@@ -336,11 +423,14 @@ fun BrowserScreen() {
                                     super.onPageFinished(view, url)
                                     canGoBack = view.canGoBack()
                                     currentShownUrl = url ?: currentShownUrl
+                                    sizeAuthFrame(view)
                                 }
 
                                 override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                                     super.onPageStarted(view, url, favicon)
+                                    loadIssues.clear()
                                     currentShownUrl = url ?: currentShownUrl
+                                    recordNav(url)
                                 }
 
                                 /** 把"白屏"变成可诊断信息 */
@@ -350,6 +440,7 @@ fun BrowserScreen() {
                                     error: android.webkit.WebResourceError
                                 ) {
                                     super.onReceivedError(view, request, error)
+                                    recordIssue("加载 ${error.errorCode}: ${safeAddress(request.url.toString())}")
                                     if (request.isForMainFrame) {
                                         browserMessage = "页面加载失败(${error.errorCode} ${error.description}) " +
                                             "url=${request.url}"
@@ -362,6 +453,7 @@ fun BrowserScreen() {
                                     errorResponse: android.webkit.WebResourceResponse
                                 ) {
                                     super.onReceivedHttpError(view, request, errorResponse)
+                                    recordIssue("HTTP ${errorResponse.statusCode}: ${safeAddress(request.url.toString())}")
                                     if (request.isForMainFrame) {
                                         browserMessage = "页面返回 HTTP ${errorResponse.statusCode}(url=${request.url})"
                                     }
@@ -379,16 +471,13 @@ fun BrowserScreen() {
                                 }
                             }
                             webChromeClient = object : WebChromeClient() {
-                                /** 统一身份认证可能以新窗口打开:在同一 WebView 内加载,避免"白屏/无反应" */
-                                override fun onCreateWindow(
-                                    view: WebView,
-                                    isDialog: Boolean,
-                                    isUserGesture: Boolean,
-                                    resultMsg: android.os.Message
+                                override fun onConsoleMessage(
+                                    message: android.webkit.ConsoleMessage
                                 ): Boolean {
-                                    val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-                                    transport.webView = view
-                                    resultMsg.sendToTarget()
+                                    // 不收集控制台正文，避免页面输出账号或令牌。
+                                    if (message.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR) {
+                                        recordIssue("脚本错误: ${safeAddress(message.sourceId())}:${message.lineNumber()}")
+                                    }
                                     return true
                                 }
                             }

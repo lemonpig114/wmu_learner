@@ -321,25 +321,25 @@ class JwxtClient(
         }
         val html = page.text
 
+        // 先把页面里与"导出/打印/PDF"有关的真实证据记进诊断:
+        // 不猜地址,靠页面自己给出来的线索定位入口(便于据实适配)
+        logExportEvidence(html)
+
         val candidates = linkedSetOf<String>()
-        // 页面里实际出现的导出/打印相关链接
-        Regex("""["'](/jwglxt/[^"']*)["']""").findAll(html).forEach { m ->
+        // 只认真正的导出/打印语义,不再用 "dy" 这类宽松匹配(会被 dynaForm 的 JS/CSS 误命中)
+        Regex("""["'](/jwglxt/[^"']*\.(?:html|htm|pdf|action)[^"']*)["']""").findAll(html).forEach { m ->
             val u = m.groupValues[1]
-            if (u.contains("pdf", true) || u.contains("print", true) || u.contains("dy", true)) candidates += u
-        }
-        Regex("""(xskbcx_[A-Za-z0-9_]*[Pp]df[A-Za-z0-9_]*\.html[^"']*)""").findAll(html).forEach { m ->
-            candidates += "/jwglxt/kbcx/" + m.groupValues[1]
+            val path = u.substringBefore('?').lowercase()
+            if (path.contains("print") || path.contains("pdf") || path.contains("export") ||
+                path.contains("xskbcx") || path.contains("kbcx")
+            ) candidates += u
         }
         val list = candidates.toList()
         log("   发现候选导出链接 ${list.size} 个")
         list.take(8).forEach { log("     · $it") }
 
         if (list.isEmpty()) {
-            val related = html.lines().filter {
-                it.contains("pdf", true) || it.contains("导出") || it.contains("打印") || it.contains("下载")
-            }.take(4).joinToString("\n").take(600)
-            log("   页面中未见导出链接;相关片段(供据此调整):\n$related")
-            return PdfOutcome(false, null, "未能从课表页发现 PDF 导出入口(诊断已记录)", list)
+            return PdfOutcome(false, null, "未能从课表页发现 PDF 导出入口(诊断已记录页面证据)", list)
         }
 
         for (c in list.take(8)) {
@@ -347,6 +347,35 @@ class JwxtClient(
             log("   试 ${c} → HTTP ${r.code},${r.body.size} 字节,${r.contentType}${if (r.isPdf) ",PDF ✓" else ""}")
             if (r.isPdf) return PdfOutcome(true, r.body, "已获取课表 PDF(${r.body.size} 字节)", list)
         }
-        return PdfOutcome(false, null, "找到导出链接但未返回 PDF(诊断已记录)", list)
+        return PdfOutcome(false, null, "找到候选但都未返回 PDF(诊断已记录,可改用网页上的「下载」按钮)", list)
+    }
+
+    /**
+     * 采集页面里与导出/打印/PDF 有关的**真实证据**(只记录结构,不含任何凭据或正文):
+     * onclick 处理函数、含关键字的标签、所有 /jwglxt/ 链接、表单 action。
+     * 用于在无法登录的情况下据实定位导出入口,而不是靠猜 URL。
+     */
+    private fun logExportEvidence(html: String) {
+        fun uniq(re: Regex, limit: Int, clean: (String) -> String = { it }): List<String> {
+            val set = linkedSetOf<String>()
+            re.findAll(html).forEach { m ->
+                if (set.size >= limit) return@forEach
+                val v = clean(m.value).replace(Regex("\\s+"), " ").trim()
+                if (v.isNotEmpty()) set += v
+            }
+            return set.toList()
+        }
+        val onclick = uniq(Regex("""onclick="([^"]{0,140})""""), 15)
+        val kwTags = uniq(Regex("""<[^<>]{0,260}?(?:导出|打印|下载|PDF|生成)[^<>]{0,200}?>"""), 12)
+        val urls = uniq(Regex("""/jwglxt/[A-Za-z0-9_/.\-]{0,120}"""), 25)
+        val forms = uniq(Regex("""<form[^>]{0,300}>"""), 5)
+        val scripts = uniq(Regex("""["']([^"']*(?:kbcx|print|export)[^"']*\.js[^"']*)["']"""), 10) { it.trim('"', '\'') }
+
+        log("   —— 导出入口证据 ——")
+        log("   onclick(${onclick.size}):${onclick.joinToString(" | ").ifBlank { "(无)" }}")
+        log("   含关键字标签(${kwTags.size}):${kwTags.joinToString("\n     ").ifBlank { "(无)" }}")
+        log("   /jwglxt/ 链接(${urls.size}):${urls.joinToString(", ").ifBlank { "(无)" }}")
+        log("   表单(${forms.size}):${forms.joinToString(" | ").ifBlank { "(无)" }}")
+        log("   相关脚本(${scripts.size}):${scripts.joinToString(", ").ifBlank { "(无)" }}")
     }
 }
