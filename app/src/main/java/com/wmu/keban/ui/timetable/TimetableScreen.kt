@@ -197,7 +197,7 @@ fun TimetableScreen() {
         banner = null
         scope.launch {
             val out = withContext(Dispatchers.IO) {
-                val client = JwxtClient()
+                val client = JwxtClient(userAgent = android.webkit.WebSettings.getDefaultUserAgent(context))
                 var note = ""
                 var sessionOk = false
                 // ① 优先尝试账号密码自动登录(服务端要求验证码时会明确告知)

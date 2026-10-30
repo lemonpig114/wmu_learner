@@ -26,7 +26,11 @@ import java.util.zip.GZIPInputStream
  *
  * 隐私:密码只在内存中使用;诊断信息不含账号(学号打码)。不做自动重试(登录失败锁定阈值 5 次)。
  */
-class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
+class JwxtClient(
+    private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY,
+    /** 传入 WebView 的 UA,让请求与「内置浏览器」完全一致(降低被风控判定为可疑的概率) */
+    private val userAgent: String? = null
+) {
 
     companion object {
         const val JWXT = "https://jwxt.wmu.edu.cn"
@@ -112,7 +116,7 @@ class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
             connectTimeout = 15000
             readTimeout = 25000
             instanceFollowRedirects = false
-            setRequestProperty("User-Agent", UA)
+            setRequestProperty("User-Agent", userAgent ?: UA)
             setRequestProperty("Accept-Encoding", "gzip")
             setRequestProperty("Accept", "text/html,application/xhtml+xml,application/pdf,*/*")
             setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9")
@@ -122,6 +126,8 @@ class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
         if (form != null) {
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            // 表单 POST 补上 Origin(浏览器会带,部分风控会校验)
+            runCatching { conn.setRequestProperty("Origin", "${uri.scheme}://${uri.host}") }
             val body = form.entries.joinToString("&") {
                 URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
             }

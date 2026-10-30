@@ -70,6 +70,7 @@ fun BrowserScreen() {
     var webView by remember { mutableStateOf<WebView?>(null) }
     var lastRequested by remember { mutableStateOf<String?>(null) }
     var browserMessage by remember { mutableStateOf<String?>(null) }
+    var currentShownUrl by remember { mutableStateOf(JWXT_TIMETABLE_PAGE) }
 
     /** 拦截网页下载:只接受 PDF,取出后交给课表页导入(复用 WebView 的登录会话) */
     fun handleDownload(url: String, mime: String?, disposition: String?) {
@@ -131,6 +132,21 @@ fun BrowserScreen() {
                 ) { Text("打开") }
             }
 
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = { webView?.goBack() }, enabled = canGoBack) { Text("‹ 后退") }
+                TextButton(onClick = { webView?.reload() }) { Text("刷新") }
+                Text(
+                    currentShownUrl.takeLast(46),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
             browserMessage?.let { msg ->
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -168,7 +184,15 @@ fun BrowserScreen() {
                             settings.domStorageEnabled = true
                             settings.allowFileAccess = false
                             settings.allowContentAccess = false
-                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                            // 教务站点在 https 页面里混用 http(CAS 回跳/内嵌),参考项目(WakeUp fork)同样
+                            // 使用 MIXED_CONTENT_ALWAYS_ALLOW;本页已禁用 file/content 访问、拦截非 http(s) 跳转
+                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                            // 登录页可能用 window.open / target=_blank 打开统一身份认证
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            settings.setSupportMultipleWindows(true)
+                            // 页面按宽度自适应,避免固定宽度登录页渲染成空白
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
                             webViewClient = object : WebViewClient() {
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView,
@@ -182,9 +206,52 @@ fun BrowserScreen() {
                                 override fun onPageFinished(view: WebView, url: String?) {
                                     super.onPageFinished(view, url)
                                     canGoBack = view.canGoBack()
+                                    currentShownUrl = url ?: currentShownUrl
+                                }
+
+                                override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                                    super.onPageStarted(view, url, favicon)
+                                    currentShownUrl = url ?: currentShownUrl
+                                }
+
+                                /** 把"白屏"变成可诊断信息 */
+                                override fun onReceivedError(
+                                    view: WebView,
+                                    request: WebResourceRequest,
+                                    error: android.webkit.WebResourceError
+                                ) {
+                                    super.onReceivedError(view, request, error)
+                                    if (request.isForMainFrame) {
+                                        browserMessage = "页面加载失败(${error.errorCode} ${error.description}) " +
+                                            "url=${request.url}"
+                                    }
+                                }
+
+                                override fun onReceivedHttpError(
+                                    view: WebView,
+                                    request: WebResourceRequest,
+                                    errorResponse: android.webkit.WebResourceResponse
+                                ) {
+                                    super.onReceivedHttpError(view, request, errorResponse)
+                                    if (request.isForMainFrame) {
+                                        browserMessage = "页面返回 HTTP ${errorResponse.statusCode}(url=${request.url})"
+                                    }
                                 }
                             }
-                            webChromeClient = WebChromeClient()
+                            webChromeClient = object : WebChromeClient() {
+                                /** 统一身份认证可能以新窗口打开:在同一 WebView 内加载,避免"白屏/无反应" */
+                                override fun onCreateWindow(
+                                    view: WebView,
+                                    isDialog: Boolean,
+                                    isUserGesture: Boolean,
+                                    resultMsg: android.os.Message
+                                ): Boolean {
+                                    val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+                                    transport.webView = view
+                                    resultMsg.sendToTarget()
+                                    return true
+                                }
+                            }
                             // Cookie:允许跨站(authserver → jwxt 的 CAS 回跳需要)
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
