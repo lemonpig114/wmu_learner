@@ -40,6 +40,14 @@ android {
     }
 }
 
+// 单元测试输出回显(解析调试需要)
+tasks.withType<Test>().configureEach {
+    testLogging {
+        showStandardStreams = true
+        events("passed", "skipped", "failed")
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
@@ -58,4 +66,11 @@ dependencies {
     ksp(libs.androidx.room.compiler)
 
     implementation(libs.material.icons.core)
+
+    // PDF 文本提取(第二阶段:课表解析)
+    implementation(libs.pdfbox.android)
+
+    // 单元测试:桌面版 pdfbox 与 App 内 pdfbox-android 同源(2.0.x),用于验证解析核心
+    testImplementation(libs.junit)
+    testImplementation(libs.pdfbox.desktop)
 }

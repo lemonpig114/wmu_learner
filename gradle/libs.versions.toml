@@ -13,6 +13,9 @@ coreKtx = "1.19.1"
 navigationCompose = "2.10.2"
 room = "2.8.5"
 materialIconsCore = "1.7.8"
+pdfboxAndroid = "2.0.27.0"
+pdfboxDesktop = "2.0.37"
+junit = "4.13.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -28,6 +31,9 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 material-icons-core = { group = "androidx.compose.material", name = "material-icons-core", version.ref = "materialIconsCore" }
+pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref = "pdfboxAndroid" }
+pdfbox-desktop = { group = "org.apache.pdfbox", name = "pdfbox", version.ref = "pdfboxDesktop" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

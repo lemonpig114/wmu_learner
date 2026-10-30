@@ -2,9 +2,9 @@ package com.wmu.keban.ui
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -43,7 +43,7 @@ fun KebanApp() {
     val items = listOf(
         BottomItem(Routes.TODAY, "今天", Icons.Filled.Home),
         BottomItem(Routes.TIMETABLE, "课表", Icons.Filled.DateRange),
-        BottomItem(Routes.TODOS, "待办", Icons.Filled.List),
+        BottomItem(Routes.TODOS, "待办", Icons.AutoMirrored.Filled.List),
         BottomItem(Routes.PROFILE, "我的", Icons.Filled.Person)
     )
 
