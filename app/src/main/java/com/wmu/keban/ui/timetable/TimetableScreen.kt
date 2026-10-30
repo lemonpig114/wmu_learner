@@ -1,6 +1,7 @@
 package com.wmu.keban.ui.timetable
 
 import android.net.Uri
+import android.webkit.CookieManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -61,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import com.wmu.keban.data.CourseSlot
 import com.wmu.keban.data.CourseWithSlots
 import com.wmu.keban.data.Graph
+import com.wmu.keban.data.ImportHandoff
 import com.wmu.keban.data.ImportRecord
 import com.wmu.keban.data.TimetableAssembler
 import com.wmu.keban.jwxt.JwxtClient
@@ -80,6 +82,14 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
 private val DAY_LABELS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+/** "a=1; b=2" → Map */
+private fun parseCookieHeader(header: String): Map<String, String> =
+    header.split(';').mapNotNull { part ->
+        val kv = part.trim()
+        if (kv.isEmpty() || !kv.contains('=')) null
+        else kv.substringBefore('=') to kv.substringAfter('=')
+    }.toMap()
 private const val MAX_SECTION = 22
 private val HEADER_H = 28.dp
 private val ROW_H = 40.dp
@@ -137,12 +147,50 @@ fun TimetableScreen() {
     var diagnostic by remember { mutableStateOf<String?>(null) }
     var showDiagnostic by remember { mutableStateOf(false) }
 
-    /** 自动获取:本机已配置的教务账号 → 统一身份认证登录 → 取课表 PDF → 解析 → 进入预览 */
+    /** PDF 字节 → 解析 → 进入预览(自动获取与浏览器下载共用同一链路) */
+    fun importPdfBytes(bytes: ByteArray, sourceName: String) {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val tmp = File(context.cacheDir, "import_auto.pdf")
+                    tmp.writeBytes(bytes)
+                    try {
+                        WmuTimetableParser.parse(AndroidPdfTextExtractor.extract(tmp))
+                    } finally {
+                        tmp.delete()
+                    }
+                }
+            }.fold(
+                onSuccess = { parsed ->
+                    if (parsed.slots.isEmpty()) {
+                        banner = "已获取课表文件,但未识别出条目:" + (parsed.warnings.firstOrNull() ?: "")
+                    } else {
+                        session = ImportSession(
+                            sourceName,
+                            TimetableAssembler.sha256("auto-${bytes.size}"),
+                            parsed,
+                            parsed.slots
+                        )
+                        duplicateOf = withContext(Dispatchers.IO) {
+                            repo.findSameImport(TimetableAssembler.signature(parsed.slots))
+                        }
+                    }
+                },
+                onFailure = { e -> banner = "文件解析失败:${e.message ?: e.javaClass.simpleName}" }
+            )
+        }
+    }
+
+    /**
+     * 自动获取:复用**内置浏览器**的教务登录会话(登录含图形验证码,只能人工完成一次)
+     * → 取课表页 → 发现导出链接 → 拉 PDF → 解析 → 进入预览。
+     */
     fun startAutoFetch() {
         val account = SecureStore.load(context, SecureStore.KIND_ACCOUNT)
         val password = SecureStore.load(context, SecureStore.KIND_PASSWORD)
-        if (account.isNullOrBlank() || password.isNullOrBlank()) {
-            banner = "请先在「我的」→「教务账号」里配置学号与密码(加密仅存本机)"
+        val cookieHeader = CookieManager.getInstance().getCookie(JwxtClient.JWXT).orEmpty()
+        if (account.isNullOrBlank() && cookieHeader.isBlank()) {
+            banner = "请先在「我的」配置教务账号(尝试全自动登录),或先用「内置浏览器」登录一次"
             return
         }
         autoFetching = true
@@ -150,9 +198,24 @@ fun TimetableScreen() {
         scope.launch {
             val out = withContext(Dispatchers.IO) {
                 val client = JwxtClient()
-                val login = client.login(account, password)
-                if (!login.ok) {
-                    AutoOutcome(false, null, "登录失败:${login.message}", client.diagnostic())
+                var note = ""
+                var sessionOk = false
+                // ① 优先尝试账号密码自动登录(服务端要求验证码时会明确告知)
+                if (!account.isNullOrBlank() && !password.isNullOrBlank()) {
+                    val login = client.login(account, password)
+                    note = login.message
+                    sessionOk = login.ok
+                }
+                // ② 账号路径不可用时,复用内置浏览器的登录会话
+                if (!sessionOk && cookieHeader.isNotBlank()) {
+                    client.useSession(parseCookieHeader(cookieHeader))
+                    if (client.hasSession()) {
+                        sessionOk = true
+                        note = if (note.isBlank()) "已复用内置浏览器会话" else "$note;已改用内置浏览器会话"
+                    }
+                }
+                if (!sessionOk) {
+                    AutoOutcome(false, null, note.ifBlank { "未建立教务会话" }, client.diagnostic())
                 } else {
                     val pdf = client.fetchTimetablePdf()
                     AutoOutcome(pdf.ok, pdf.bytes, pdf.message, client.diagnostic())
@@ -162,35 +225,18 @@ fun TimetableScreen() {
             diagnostic = out.diagnostic
             val bytes = out.bytes
             if (out.ok && bytes != null) {
-                withContext(Dispatchers.IO) {
-                    runCatching {
-                        val tmp = File(context.cacheDir, "auto_timetable.pdf")
-                        tmp.writeBytes(bytes)
-                        try {
-                            WmuTimetableParser.parse(AndroidPdfTextExtractor.extract(tmp))
-                        } finally {
-                            tmp.delete()
-                        }
-                    }
-                }.fold(
-                    onSuccess = { parsed ->
-                        if (parsed.slots.isEmpty()) {
-                            banner = "已获取课表文件,但未识别出条目:" + (parsed.warnings.firstOrNull() ?: "")
-                        } else {
-                            session = ImportSession("教务自动获取.pdf", TimetableAssembler.sha256("auto"), parsed, parsed.slots)
-                            duplicateOf = withContext(Dispatchers.IO) {
-                                repo.findSameImport(TimetableAssembler.signature(parsed.slots))
-                            }
-                        }
-                    },
-                    onFailure = { e ->
-                        banner = "获取到的文件解析失败:${e.message ?: e.javaClass.simpleName}"
-                    }
-                )
+                importPdfBytes(bytes, "教务自动获取.pdf")
             } else {
                 banner = "自动获取失败:${out.message}(可点「诊断」查看详情)"
             }
         }
+    }
+
+    // 内置浏览器里下载到课表 PDF 后,回到本页自动进入解析预览
+    LaunchedEffect(Unit) {
+        val file = ImportHandoff.take() ?: return@LaunchedEffect
+        val bytes = withContext(Dispatchers.IO) { runCatching { file.readBytes() }.getOrNull() }
+        if (bytes != null) importPdfBytes(bytes, file.name) else banner = "待导入文件读取失败,请重新获取"
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->

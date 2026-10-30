@@ -48,6 +48,7 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
     var pickSemester by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
+
     var account by remember { mutableStateOf(SecureStore.load(context, SecureStore.KIND_ACCOUNT)) }
     var showCredDialog by remember { mutableStateOf(false) }
 
@@ -79,12 +80,13 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
 
             SectionCard("教务账号(自动获取课表)") {
                 Text(
-                    if (account.isNullOrBlank()) "未配置" else "已配置:学号 ****" + account!!.takeLast(4),
+                    if (account.isNullOrBlank()) "未配置(仍可用内置浏览器登录)" else "已配置:学号 ****" + account!!.takeLast(4),
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    "配置后,「课表」页点「自动获取」即可自动登录学校统一身份认证并拉取课表 PDF。\n" +
-                        "密码经 Android Keystore 加密后仅保存在本机;不写日志、不上传、可随时清除。",
+                    "配置后,课表页点「自动获取」会先尝试用账号密码自动登录统一身份认证;" +
+                        "若本次登录被要求图形验证码,会自动改用「内置浏览器」的登录会话。\n" +
+                        "密码经 Android Keystore 加密后仅存本机,不写日志、不上传,可随时清除。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -99,6 +101,22 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
                             account = null
                         }) { Text("清除") }
                     }
+                }
+            }
+
+            SectionCard("教务登录(浏览器会话)") {
+                Text(
+                    "在「内置浏览器」中登录教务(可以人工输入验证码),登录一次即可;" +
+                        "之后「自动获取」与网页内「下载」都会复用该会话。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row {
+                    TextButton(onClick = onOpenBrowser) { Text("打开内置浏览器登录") }
+                    TextButton(onClick = {
+                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                        android.webkit.CookieManager.getInstance().flush()
+                    }) { Text("清除登录会话") }
                 }
             }
 
@@ -157,8 +175,8 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
                         label = { Text("统一身份认证密码") }, singleLine = true
                     )
                     Text(
-                        "账号仅用于自动登录学校统一身份认证并获取课表。" +
-                            "密码经 Android Keystore 加密后仅存本机,不写日志、不上传;可随时清除。",
+                        "密码经 Android Keystore 加密后仅存本机,仅用于登录学校统一身份认证;" +
+                            "不写日志、不上传。若登录时被要求验证码,应用会自动改用浏览器会话。",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

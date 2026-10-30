@@ -96,7 +96,16 @@ class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
         }
     }
 
-    private fun request(url: String, method: String, referer: String?, form: Map<String, String>? = null): Resp {
+    private fun request(url: String, method: String, referer: String?, form: Map<String, String>? = null): Resp =
+        requestWithCookieHeader(url, method, referer, form, null)
+
+    private fun requestWithCookieHeader(
+        url: String,
+        method: String,
+        referer: String?,
+        form: Map<String, String>? = null,
+        cookieOverride: String? = null
+    ): Resp {
         val uri = URI(url)
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method
@@ -106,12 +115,13 @@ class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
             setRequestProperty("User-Agent", UA)
             setRequestProperty("Accept-Encoding", "gzip")
             setRequestProperty("Accept", "text/html,application/xhtml+xml,application/pdf,*/*")
-            cookieHeaderFor(uri.host)?.let { setRequestProperty("Cookie", it) }
+            setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9")
+            (cookieOverride ?: cookieHeaderFor(uri.host))?.let { setRequestProperty("Cookie", it) }
             referer?.let { setRequestProperty("Referer", it) }
         }
         if (form != null) {
             conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             val body = form.entries.joinToString("&") {
                 URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
             }
@@ -163,12 +173,12 @@ class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
             log("   未找到 execution 隐藏项")
             return LoginOutcome(false, "登录页结构变化:未找到 execution")
         }
-        // 验证码是否已被服务端要求(容器默认 display:none)
-        val captchaShown = Regex("""id="captchaParent"[^>]*style="([^"]*)"""")
-            .find(loginHtml)?.groupValues?.get(1)?.contains("none")?.not() ?: false
-        if (captchaShown) {
-            log("   该账号登录需要验证码")
-            return LoginOutcome(false, "教务处要求输入验证码(通常是多次失败后触发),请稍后用内置浏览器手动登录一次")
+        // 验证码是否**本次**被要求:由服务端按会话/风控决定,不是每次都要求
+        // (用户实测:正常浏览器登录无需验证码;而线程外的匿名抓取被判定可疑时才出现 show() 调用)
+        val captchaRequired = Regex("""captchaParent"\)\s*\.\s*show""").containsMatchIn(loginHtml)
+        if (captchaRequired) {
+            log("   本次登录被要求图形验证码(服务端风控判定)")
+            return LoginOutcome(false, "本次登录被要求输入图形验证码,可改用「内置浏览器」登录一次")
         }
         val service = Regex("""[?&]service=([^&"']+)""").find(entryUrl)?.groupValues?.get(1)
 
@@ -187,11 +197,25 @@ class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
             .getOrElse { return LoginOutcome(false, "网络请求失败:${it.javaClass.simpleName}") }
         log("   提交响应 HTTP ${posted.code}${posted.location?.let { " → ${URI(it).host}" } ?: ""}")
 
-        // 失败提示(认证服务器在返回页里给出)
-        val errText = listOf(
+        // 失败提示:优先取认证服务器的错误容器 #errorDiv p(实测页面 config.error 即取此处)
+        val errFromDiv = Regex("""id="errorDiv"[^>]*>(.*?)</div>""", RegexOption.DOT_MATCHES_ALL)
+            .find(posted.text)?.groupValues?.get(1)
+            ?.replace(Regex("<[^>]+>"), "")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        val errText = errFromDiv ?: listOf(
             "用户名或密码错误", "密码错误", "用户名不存在", "账号被锁定", "账户被锁定",
-            "验证码", "登录失败", "认证失败", "密码已过期"
+            "请输入验证码", "验证码错误", "登录失败", "认证失败", "密码已过期"
         ).firstOrNull { posted.text.contains(it) }
+        if (errText != null) log("   服务端提示:$errText")
+        // 诊断附上响应片段(便于据实排查;不含任何凭据)
+        val snippet = posted.text
+            .replace(Regex("<(script|style)[^>]*>.*?</\\1>", RegexOption.DOT_MATCHES_ALL), " ")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(200)
+        log("   响应片段:${snippet.ifEmpty { "(空)" }}")
 
         // 成功:跟随票据回跳,或已建立 jwxt 会话
         var landed = posted
@@ -215,6 +239,25 @@ class JwxtClient(private val ssoEntry: String = JWXT + TIMETABLE_SSO_ENTRY) {
         val ok = r.code == 200 && !r.text.contains("login_slogin")
         if (!ok) log("   教务首页返回 HTTP ${r.code},长度 ${r.body.size}")
         return ok
+    }
+
+    /** 注入外部会话(来自内置浏览器登录后的 Cookie),用于免账号密码取课表 */
+    fun useSession(cookies: Map<String, String>) {
+        val jar = cookiesByHost.getOrPut(URI(JWXT).host) { linkedMapOf() }
+        jar.putAll(cookies)
+        log("使用内置浏览器会话(Cookie ${cookies.size} 项)")
+    }
+
+    fun hasSession(): Boolean = verifySession()
+
+    /**
+     * 直接用会话 Cookie 下载某个 URL 的 PDF(内置浏览器下载拦截用)。
+     * 非 PDF 内容返回 null,由调用方提示用户。
+     */
+    fun downloadPdf(url: String, cookieHeader: String?): ByteArray? {
+        val r = requestWithCookieHeader(url, "GET", JWXT, null, cookieHeader)
+        log("   下载 $url → HTTP ${r.code},${r.body.size} 字节,${r.contentType}${if (r.isPdf) ",PDF ✓" else ""}")
+        return if (r.isPdf) r.body else null
     }
 
     // ───────────────────────── 课表 PDF ─────────────────────────
