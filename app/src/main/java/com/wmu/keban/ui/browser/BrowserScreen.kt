@@ -80,6 +80,7 @@ fun BrowserScreen() {
     var diagText by remember { mutableStateOf<String?>(null) }
     val loadIssues = remember { mutableListOf<String>() }
     val navHistory = remember { mutableListOf<String>() }
+    val exportHits = remember { mutableListOf<String>() }
     fun safeAddress(url: String?): String = runCatching {
         val uri = android.net.Uri.parse(url.orEmpty())
         "${uri.scheme}://${uri.host}${uri.path.orEmpty()}"
@@ -90,6 +91,18 @@ fun BrowserScreen() {
         if (a.isBlank() || navHistory.lastOrNull() == a) return
         if (navHistory.size >= 12) navHistory.removeAt(0)
         navHistory.add(a)
+    }
+    /** 记录与导出/打印/PDF 有关的请求(含 JS 表单 POST —— 这类请求不会触发页面导航) */
+    fun recordExportHit(url: String, method: String) {
+        val low = url.lowercase()
+        val hit = low.contains("pdf") || low.contains("print") || low.contains("export") ||
+            low.contains("shcpdf") || low.contains("/drdc/") || low.contains("dcclbh")
+        if (!hit) return
+        val a = "$method ${safeAddress(url)}"
+        if (!exportHits.contains(a)) {
+            if (exportHits.size >= 12) exportHits.removeAt(0)
+            exportHits.add(a)
+        }
     }
     fun recordIssue(issue: String) {
         if (loadIssues.size >= 20) loadIssues.removeAt(0)
@@ -182,6 +195,7 @@ fun BrowserScreen() {
             append("\nUA:${webView?.settings?.userAgentString}")
             append("\n\n最近加载问题:\n${loadIssues.joinToString("\n").ifBlank { "未捕获" }}")
             append("\n\n最近访问(已去查询参数):\n${navHistory.joinToString("\n").ifBlank { "(无)" }}")
+            append("\n\n导出相关请求(已去查询参数):\n${exportHits.joinToString("\n").ifBlank { "(未捕获)" }}")
         }
         // 页面内容探针:evaluateJavascript 是异步的,不能写成同步函数返回值
         val w = webView
@@ -244,8 +258,103 @@ fun BrowserScreen() {
         }
     }
 
+    /**
+     * 让页面自己走它的导出流程:点击页面里已存在的导出按钮(证据:课表页有 id="shcPDF" 的按钮)。
+     * 不猜接口、不伪造请求 —— 触发后由 DownloadListener 或导航记录接管,拿到的就是网站的真实产物。
+     */
+    fun clickPageExport() {
+        val w = webView
+        if (w == null) {
+            browserMessage = "页面尚未就绪"
+            return
+        }
+        val js = """
+            (function(){
+              try{
+                var b=document.getElementById('shcPDF');
+                if(b){ b.click(); return '已点击导出按钮(shcPDF)'; }
+                var all=document.querySelectorAll('button,a,input');
+                for(var i=0;i<all.length;i++){
+                  var t=(all[i].textContent||all[i].value||'').trim();
+                  if(t.indexOf('PDF')>=0||t.indexOf('导出')>=0||t.indexOf('打印')>=0){
+                    all[i].click(); return '已点击文本匹配按钮:'+t.slice(0,24);
+                  }
+                }
+                return '页面上没找到导出按钮';
+              }catch(e){ return '点击失败:'+e; }
+            })()
+        """.trimIndent()
+        w.evaluateJavascript(js) { raw ->
+            val res = runCatching {
+                org.json.JSONTokener(raw).nextValue() as String
+            }.getOrElse { raw ?: "" }
+            browserMessage = "$res；若没看到下载或跳转,请点「自检」看「最近访问」与「导出相关请求」"
+        }
+    }
+
+    /**
+     * 同构取课表数据:直接复用**页面自己的查询表单**(action 与字段名都来自页面,不是我编的),
+     * 用当前登录会话 POST 一次,只回报响应结构(字段名),不回报任何课程数据值。
+     */
+    fun probeTimetableData() {
+        val w = webView
+        if (w == null) {
+            browserMessage = "页面尚未就绪"
+            return
+        }
+        val cookie = CookieManager.getInstance().getCookie(JWXT_TIMETABLE_PAGE).orEmpty()
+        if (cookie.isBlank()) {
+            browserMessage = "尚未检测到登录会话,请先登录"
+            return
+        }
+        val js = """
+            (function(){
+              try{
+                var f=document.getElementById('ajaxForm')||document.forms[0];
+                if(!f) return JSON.stringify({error:'页面上没有表单'});
+                var out={action:f.getAttribute('action')||'',fields:{}};
+                var els=f.elements;
+                for(var i=0;i<els.length;i++){
+                  var e=els[i]; if(!e.name) continue;
+                  if(e.type==='checkbox'||e.type==='radio'){ if(e.checked) out.fields[e.name]=e.value; }
+                  else out.fields[e.name]=e.value;
+                }
+                return JSON.stringify(out);
+              }catch(e){ return JSON.stringify({error:'读取表单失败:'+e}); }
+            })()
+        """.trimIndent()
+        w.evaluateJavascript(js) { raw ->
+            val parsed = runCatching {
+                org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
+            }.getOrNull()
+            val action = parsed?.optString("action").orEmpty()
+            if (parsed == null || action.isBlank()) {
+                diagText = "读取页面表单失败:${raw?.take(200)}"
+                return@evaluateJavascript
+            }
+            val fields = linkedMapOf<String, String>()
+            parsed.optJSONObject("fields")?.let { fo ->
+                fo.keys().forEach { k -> fields[k] = fo.optString(k) }
+            }
+            browserMessage = "正在用页面表单取课表数据…"
+            scope.launch {
+                val summary = withContext(Dispatchers.IO) {
+                    runCatching {
+                        JwxtClient(
+                            userAgent = JwxtClient.wmuUserAgent(WebSettings.getDefaultUserAgent(ctx))
+                        ).probeTimetableData(JWXT_TIMETABLE_PAGE, action, fields, cookie)
+                    }.getOrElse { "请求失败:${it.javaClass.simpleName} ${it.message}" }
+                }
+                val sentFields = fields.keys.joinToString(", ")
+                diagText = "表单 action:$action\n提交字段名:$sentFields\n(字段值不上报)\n\n$summary"
+                browserMessage = null
+            }
+        }
+    }
+
     /** 拦截网页下载:只接受 PDF,取出后交给课表页导入(复用 WebView 的登录会话) */
     fun handleDownload(url: String, mime: String?, disposition: String?) {
+
         val looksPdf = mime?.contains("pdf", true) == true ||
             url.contains(".pdf", true) ||
             disposition?.contains("pdf", true) == true
@@ -320,6 +429,14 @@ fun BrowserScreen() {
                         w.reload()
                     }
                 }) { Text(uaLabels[uaMode]) }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 让页面自己走它的导出流程:点了之后由 DownloadListener 或导航记录接管(不猜接口)
+                TextButton(onClick = { clickPageExport() }) { Text("点页面「导出PDF」") }
+                TextButton(onClick = { probeTimetableData() }) { Text("取课表数据") }
             }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp),
@@ -457,6 +574,15 @@ fun BrowserScreen() {
                                     if (request.isForMainFrame) {
                                         browserMessage = "页面返回 HTTP ${errorResponse.statusCode}(url=${request.url})"
                                     }
+                                }
+
+                                /** 记录与导出相关的请求(含 JS 表单 POST,这类请求不触发导航,只能在此看到) */
+                                override fun shouldInterceptRequest(
+                                    view: WebView,
+                                    request: WebResourceRequest
+                                ): android.webkit.WebResourceResponse? {
+                                    recordExportHit(request.url.toString(), request.method)
+                                    return null
                                 }
 
                                 /** 证书异常:只报告,不擅自放行(避免中间人窃取登录口令) */

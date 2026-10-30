@@ -351,6 +351,42 @@ class JwxtClient(
     }
 
     /**
+     * 用**页面自己的查询表单**做一次同构请求(action 与字段名都取自页面,非猜测),
+     * 只回报响应结构与字段名,**不回报任何课程数据值**(便于据此写映射,同时避免泄露个人数据)。
+     */
+    fun probeTimetableData(
+        pageUrl: String,
+        actionPath: String,
+        form: Map<String, String>,
+        cookieHeader: String
+    ): String {
+        val url = runCatching { URI(pageUrl).resolve(actionPath).toString() }.getOrDefault(actionPath)
+        val r = requestWithCookieHeader(url, "POST", pageUrl, form, cookieHeader)
+        val sb = StringBuilder()
+        sb.append("POST $url\n→ HTTP ${r.code},${r.body.size} 字节,${r.contentType}\n")
+        val text = r.text.trimStart()
+        if (text.startsWith("{") || text.startsWith("[")) {
+            runCatching {
+                val o = org.json.JSONObject(text)
+                sb.append("顶层字段名:${o.keys().asSequence().toList()}\n")
+                o.keys().forEach { k ->
+                    val arr = o.optJSONArray(k)
+                    if (arr != null && arr.length() > 0) {
+                        arr.optJSONObject(0)?.let { e ->
+                            sb.append("$k[0] 字段名(${arr.length()} 条):")
+                            sb.append(e.keys().asSequence().toList())
+                            sb.append('\n')
+                        }
+                    }
+                }
+            }.onFailure { sb.append("JSON 解析失败:${it.javaClass.simpleName}\n") }
+        } else {
+            sb.append("非 JSON 响应;前 120 字:${text.take(120)}\n")
+        }
+        return sb.toString()
+    }
+
+    /**
      * 采集页面里与导出/打印/PDF 有关的**真实证据**(只记录结构,不含任何凭据或正文):
      * onclick 处理函数、含关键字的标签、所有 /jwglxt/ 链接、表单 action。
      * 用于在无法登录的情况下据实定位导出入口,而不是靠猜 URL。
