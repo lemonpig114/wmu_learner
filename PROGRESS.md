@@ -1,31 +1,64 @@
 # 开发进度记录（PROGRESS）
 
-最近更新：2026-10-30，Codex 接续修复。
+最近更新：2026-10-30（WorkBuddy 接续：第二阶段解析核心完成并提交）
 
 ## 当前范围
 
-课伴 KeBan：面向温州医科大学学生的安卓课程助手。第一阶段已实现四页面、本地 Room 待办及内置浏览器；第二阶段 PDF 解析与课表预览校正、第三阶段教务 PDF 下载尚未实现。学习通/知到/在浙学、AI 通知不在本期范围。
+课伴 KeBan：面向温州医科大学学生的安卓课程助手。
+- 第一阶段 ✅：四页面、Room 本地待办、内置浏览器、首个可安装 APK、Git 版本管理
+- 第二阶段 🔄：PDF 课表解析核心 ✅（含真实文件单测）→ 导入 UI / 数据落库 / 周课表网格 待做
+- 第三阶段 ☐：教务入口登录与课表 PDF 下载（入口已确认：`jwxt.wmu.edu.cn/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html?gnmkdm=N2151&layout=default`）
+- 第四阶段 ☐：真机验证与交付
+- 不在本期：学习通 / 知到 / 在浙学接入、AI 通知
 
-## 本次修复
+## Git 记录
 
-- 本机 Gradle 代理原端口 55880 已失效，调整为当前 mihomo 监听的 7890；配置位于用户级 `.gradle/gradle.properties`，不进入项目。
-- SDK 37.1 原目录只有 `.installer`，现通过官方 sdkmanager 完整安装。
-- `app/build.gradle.kts` 明确使用 compileSdk 37.1；targetSdk 36、minSdk 26。
-- 修复 `KebanRepo` 构造函数可见性、今天页 Material3 Card 导入、WebView `MIXED_CONTENT_NEVER_ALLOW` 常量及 TaskEditDialog 实验 API 声明。
-- 修复本机 `local.properties` 的盘符转义；更新 README 工具链版本。
+| 提交 | 内容 |
+|------|------|
+| `2610681` + 标签 `phase-1` | 第一阶段：最小工程与版本管理（四页面 + 本地待办 + 内置浏览器，APK 已验证） |
+| `858d12d` | 阶段2(上)：PDF 解析核心 + 真实文件单测验证 |
+
+> 注：本目录此前由辅助工具 Codex 做过接续修复（见下节），相关改动已包含在 `2610681` 中。
+
+## 辅助工具 Codex 接续修复记录（2026-10-30，用户在其环境中执行）
+
+- 本机 Gradle 代理端口从 55880 改为 mihomo 监听的 **7890**（用户级 `.gradle/gradle.properties`，不入项目）。
+- SDK 37.1 完整安装（此前目录只有 `.installer`）。
+- `app/build.gradle.kts` 明确使用 compileSdk 37.1（AGP 9 新 DSL）；targetSdk 36、minSdk 26。
+- 修复 WorkBuddy 初版代码的 4 处真实缺陷：
+  1. `KebanRepo` 构造函数可见性；
+  2. 今天页误用 `androidx.compose.foundation.layout.Card` 导入（应为 material3）；
+  3. WebView 常量 `MIXED_CONTENT_NEVER` → `MIXED_CONTENT_NEVER_ALLOW`；
+  4. `TaskEditDialog` 使用实验 API 缺 `@OptIn` 声明。
+- 修复 `local.properties` 盘符转义。
+- 验证：`assembleDebug lintDebug --rerun-tasks` 成功（52 秒，47 项任务全执行），Lint 0 错误、6 条非阻断警告，APK 签名校验通过。
+- 指出示例数据缺陷：原实现只检查待办数量，删除示例后重启会被重新写入 → **已由 WorkBuddy 修复**（改为 settings 标记位只播种一次，见 `KebanRepo.seedSampleIfNeeded`）。
+
+## 第二阶段实测结论（重要，均为真实文件实测）
+
+| 事实 | 依据 |
+|------|------|
+| 课表 PDF 为文字型、8 页横排、页面旋转 90°，pdfbox 的 xDirAdj/yDirAdj 已自动校正 | 结构转储 `.analysis-local/token_dump.txt` |
+| 表头（星期一~日）**仅首页出现一次**，各页共用列坐标 | 转储中「星期一」仅 1 处 |
+| 单元格节次取 `(a-b节)` 注记，**不能按等距行推**（行高随内容自适应，单元格可跨页续行） | 转储页 1/页 2 衔接处 |
+| 真实单元格数 = **52**（独立统计 `(a-b节)` 注记），pdfplumber 早前计 45 为漏计 | 两种方法交叉核对 |
+| **同一课表重复导出，文件 MD5 不同**（打印时间差异）→ 去重必须做解析后语义比对，不能只看 hash | 3 个副本实测：df84df…/aca605…/f887c2… |
+| 教务页面匿名访问返回 **403**，必须登录 → WebView 登录后拦截真实下载响应，不能猜直链 | curl 探测 |
 
 ## 工具链
 
-Gradle wrapper 9.6.0 / AGP 9.4.1 / Kotlin Compose 插件 2.4.21 / KSP 2.3.12 / JDK 21。依赖版本见 `gradle/libs.versions.toml`。
+Gradle wrapper 9.6.0 / AGP 9.4.1（内置 Kotlin）/ Kotlin Compose 插件 2.4.21 / KSP 2.3.12 / Compose BOM 2026.09.00 / Room 2.8.5 / JDK 21 / compileSdk 37.1 / minSdk 26 / targetSdk 36；PDF：App 内 pdfbox-android 2.0.27.0，单测桌面 pdfbox 2.0.37。依赖见 `gradle/libs.versions.toml`。
 
-## 验证
+## 测试与验证
 
-- SDK 依赖元数据校验、KSP、Kotlin 编译通过，已生成 debug APK（0.1.0）。
-- 完整重跑 `assembleDebug lintDebug --rerun-tasks` 成功（52 秒，47 项任务全部执行）；Lint 0 错误、6 条非阻断警告；APK 签名校验通过。
-- 当前 `adb devices` 无设备，尚未验证安装、界面交互和重启持久化。
-- 原文档声称“唯一问题是 SDK”“示例删除后不再出现”缺少验证依据：现有示例初始化只检查待办数量，删除所有待办后重新启动可能再次写入示例，留待行为修复。
+- ✅ 单元测试全通过（`./gradlew :app:testDebugUnitTest`）：
+  - `WeeksTest` 6 项（周次表达式：单周/区间/不连续/单双周/混合/不可解析返回 null）
+  - `WmuTimetableParserTest` 2 项（2026-2027-1 样本 **52 条**、跨学期 2025-2026-1 样本 **45 条**，含隐私回归断言）
+  - `PdfTokenDumpTest` 1 项（结构转储）
+- ✅ 2026-2027-1 样本解析结果与独立计数一致，学期/打印时间/实践课程行均正确识别
+- ❌ 待验证：真机安装与界面交互（`adb devices` 无设备）；重启持久化；跨设备
 
 ## 下一步
 
-连接真机完成安装与四页面冒烟，再推进 PDF 导入。当前目录尚未初始化 Git；历史交接和作品记录保存在 HANDOVER.md 与 docs/worklog/。
-
+1. 第二阶段下半：SAF 选 PDF → 解析 → **预览校正** → 确认保存（Room v2：Course/CourseSlot）→ 周课表网格；重复导入按语义比对去重（替换上次导入、保留手动课程）；导入失败不破坏既有数据；手动增删改课程。
+2. 再连真机做第一阶段冒烟 + 第二阶段整体验证。

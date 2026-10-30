@@ -62,11 +62,14 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
     }
 
     /**
-     * 首次启动且库为空时写入一条示例数据。
-     * 示例数据 isSample = true,UI 明确标注,用户可删除;
-     * 一旦用户产生了自己的数据(count > 0)则不再写入。
+     * 示例数据只在首次启动写入一次(用 settings 里的标记位记录),
+     * 避免"用户删掉示例后重启又被写回来"的行为缺陷。
+     * 示例数据 isSample = true,UI 明确标注,可删除;已有真实数据时不再写入。
      */
     suspend fun seedSampleIfNeeded() {
+        if (db.settingDao().get(KEY_SAMPLE_SEEDED) != null) return
+        // 先记标记,再决定是否插入,保证只执行一次
+        db.settingDao().put(Setting(KEY_SAMPLE_SEEDED, "1"))
         if (db.taskDao().count() > 0) return
         val due = LocalDate.now().plusDays(2).atTime(18, 0)
             .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
@@ -83,6 +86,7 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
 
     companion object {
         const val KEY_SEMESTER_START = "semester_start_epoch_day"
+        const val KEY_SAMPLE_SEEDED = "sample_seeded"
     }
 }
 

@@ -47,6 +47,9 @@ interface SettingDao {
     @Query("SELECT * FROM settings WHERE `key` = :key")
     fun observe(key: String): Flow<Setting?>
 
+    @Query("SELECT * FROM settings WHERE `key` = :key")
+    suspend fun get(key: String): Setting?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun put(setting: Setting)
 }
