@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose 应用宿主主题:仅提供窗口宿主,配色由 Compose MaterialTheme 管理 -->
+    <style name="Theme.KeBan" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

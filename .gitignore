@@ -1,0 +1,32 @@
+# ===== 构建产物 =====
+.gradle/
+build/
+app/build/
+captures/
+.cxx/
+
+# ===== IDE / 本机配置 =====
+.idea/
+*.iml
+local.properties
+.DS_Store
+Thumbs.db
+
+# ===== 密钥与私密信息:绝不提交 =====
+*.jks
+*.keystore
+keystore.properties
+secrets.properties
+*.pem
+*.p12
+
+# ===== 个人课表与本地分析数据:绝不提交 =====
+*.pdf
+.analysis-local/
+samples-local/
+
+# ===== 日志 =====
+*.log
+
+# ===== 保留 Gradle Wrapper =====
+!gradle/wrapper/gradle-wrapper.jar

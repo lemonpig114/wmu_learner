@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 课伴启动图标前景:日历 + 对勾 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 日历主体 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,40 h44 a4,4 0 0 1 4,4 v28 a4,4 0 0 1 -4,4 h-44 a4,4 0 0 1 -4,-4 v-28 a4,4 0 0 1 4,-4 z" />
+
+    <!-- 日历顶部横带(半透明白) -->
+    <path
+        android:fillColor="#B3FFFFFF"
+        android:pathData="M28,44 a4,4 0 0 1 4,-4 h44 a4,4 0 0 1 4,4 v6 h-52 z" />
+
+    <!-- 左挂环 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,31 a2.5,2.5 0 0 1 5,0 l0,9 a2.5,2.5 0 0 1 -5,0 z" />
+
+    <!-- 右挂环 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M63,31 a2.5,2.5 0 0 1 5,0 l0,9 a2.5,2.5 0 0 1 -5,0 z" />
+
+    <!-- 对勾(主题色) -->
+    <path
+        android:strokeColor="#1F6FB2"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M42,61 L51,70 L67,53" />
+</vector>
