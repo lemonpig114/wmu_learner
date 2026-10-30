@@ -191,7 +191,12 @@ fun TimetableScreen() {
         banner = null
         scope.launch {
             val out = withContext(Dispatchers.IO) {
-                val client = JwxtClient(userAgent = android.webkit.WebSettings.getDefaultUserAgent(context))
+                // UA 与内置浏览器保持一致(含教务站点所需的伪装),避免请求特征不同被判可疑
+                val client = JwxtClient(
+                    userAgent = JwxtClient.wmuUserAgent(
+                        android.webkit.WebSettings.getDefaultUserAgent(context)
+                    )
+                )
                 var note = ""
                 var sessionOk = false
                 // ① 优先:复用内置浏览器已建立的登录会话

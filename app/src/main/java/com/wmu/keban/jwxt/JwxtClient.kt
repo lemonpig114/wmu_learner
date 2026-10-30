@@ -49,6 +49,16 @@ class JwxtClient(
                 else kv.substringBefore('=') to kv.substringAfter('=')
             }.toMap()
 
+        /**
+         * 教务站点用的 UA 伪装:把 `Mobile`→`eliboM`、`Android`→`diordnA`。
+         *
+         * 做法来自参考项目 wakeup-course-schedule 的 WebViewLoginFragment(默认启用,并配了开关):
+         * 正方/金智教务对"Android/Mobile" UA 会返回异常页面(手机版/白屏)。
+         * 只改 UA 里的两个标记词,引擎与版本号保持不变,避免 UA 与内核不一致再被识别。
+         */
+        fun wmuUserAgent(base: String): String =
+            base.replace("Mobile", "eliboM").replace("Android", "diordnA")
+
         private const val UA =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
     }

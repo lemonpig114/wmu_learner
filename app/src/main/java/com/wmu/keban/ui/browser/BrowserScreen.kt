@@ -78,7 +78,14 @@ fun BrowserScreen() {
     var browserMessage by remember { mutableStateOf<String?>(null) }
     var currentShownUrl by remember { mutableStateOf(JWXT_TIMETABLE_PAGE) }
     var diagText by remember { mutableStateOf<String?>(null) }
-    var desktopUa by remember { mutableStateOf(false) }
+    // UA 模式:0 伪装(默认,与参考项目一致) 1 桌面 2 原生
+    var uaMode by remember { mutableStateOf(0) }
+    val uaLabels = listOf("UA:伪装", "UA:桌面", "UA:原生")
+    fun uaFor(mode: Int, base: String) = when (mode) {
+        1 -> DESKTOP_UA
+        2 -> base
+        else -> JwxtClient.wmuUserAgent(base)
+    }
 
     /** 用 WebView 的登录会话直接取课表 PDF(不依赖页面上的下载按钮) */
     fun fetchWithSession() {
@@ -116,7 +123,7 @@ fun BrowserScreen() {
         }
     }
 
-    /** 会话自检:只列 Cookie 名称(不含值),用于判断登录是否真的成功 */
+    /** 会话自检:只列 Cookie 名称(不含值),并探测页面实际内容,用于判断"白屏"到底是什么 */
     fun selfCheck() {
         val cm = CookieManager.getInstance()
         val jwxt = cm.getCookie(JwxtClient.JWXT).orEmpty()
@@ -127,12 +134,49 @@ fun BrowserScreen() {
         val loggedIn = currentShownUrl.contains("xskbcx") ||
             currentShownUrl.contains("index_initMenu") ||
             currentShownUrl.contains("/jwglxt/") && !currentShownUrl.contains("login")
-        diagText = buildString {
+        val basic = buildString {
             append("当前地址:${currentShownUrl}\n\n")
             append("jwxt.wmu.edu.cn Cookie:${names(jwxt)}\n")
             append("authserver Cookie:${names(auth)}\n\n")
             append(if (loggedIn) "判断:看起来已进入教务内页(登录可能已成功)" else "判断:仍在登录相关页面(登录可能未完成)")
             append("\n\n提示:只有出现 JSESSIONID 之类的教务会话 Cookie 才算登录成功。")
+        }
+        // 页面内容探针:evaluateJavascript 是异步的,不能写成同步函数返回值
+        val w = webView
+        if (w == null) {
+            diagText = basic
+            return
+        }
+        val probe = """
+            (function(){
+              try{
+                var b = document.body;
+                var t = b ? (b.innerText || '') : '';
+                return JSON.stringify({
+                  title: document.title || '',
+                  ready: document.readyState || '',
+                  bodyChildren: b ? b.childElementCount : -1,
+                  htmlLen: document.documentElement ? document.documentElement.outerHTML.length : -1,
+                  textLen: t.length,
+                  text: t.replace(/\s+/g,' ').slice(0,300)
+                });
+              }catch(e){ return JSON.stringify({error: String(e)}); }
+            })()
+        """.trimIndent()
+        w.evaluateJavascript(probe) { raw ->
+            val pretty = runCatching {
+                val obj = org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
+                buildString {
+                    append("\n\n【页面内容探针】\n")
+                    append("标题:${obj.optString("title").ifBlank { "(空)" }}\n")
+                    append("readyState:${obj.optString("ready")}\n")
+                    append("body 子元素:${obj.optInt("bodyChildren", -1)}\n")
+                    append("HTML 长度:${obj.optInt("htmlLen", -1)}\n")
+                    append("可见文本长度:${obj.optInt("textLen", -1)}\n")
+                    append("正文前 300 字:${obj.optString("text").ifBlank { "(空白页面)" }}")
+                }
+            }.getOrElse { "\n\n【页面内容探针】解析失败:${raw?.take(200)}" }
+            diagText = basic + pretty
         }
     }
 
@@ -205,12 +249,13 @@ fun BrowserScreen() {
                 TextButton(onClick = { fetchWithSession() }) { Text("获取课表") }
                 TextButton(onClick = { selfCheck() }) { Text("自检") }
                 TextButton(onClick = {
-                    desktopUa = !desktopUa
+                    uaMode = (uaMode + 1) % 3
                     webView?.let { w ->
-                        w.settings.userAgentString = if (desktopUa) DESKTOP_UA else null
+                        w.settings.userAgentString =
+                            uaFor(uaMode, WebSettings.getDefaultUserAgent(ctx))
                         w.reload()
                     }
-                }) { Text(if (desktopUa) "手机版" else "桌面版") }
+                }) { Text(uaLabels[uaMode]) }
             }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp),
@@ -271,6 +316,12 @@ fun BrowserScreen() {
                             // 页面按宽度自适应,避免固定宽度登录页渲染成空白
                             settings.useWideViewPort = true
                             settings.loadWithOverviewMode = true
+                            settings.textZoom = 100
+                            // UA 伪装(参考项目默认做法):规避教务对 Android/Mobile UA 的异常响应
+                            settings.userAgentString = uaFor(0, WebSettings.getDefaultUserAgent(ctx))
+                            settings.setSupportZoom(true)
+                            settings.builtInZoomControls = true
+                            settings.displayZoomControls = false
                             webViewClient = object : WebViewClient() {
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView,
@@ -314,6 +365,17 @@ fun BrowserScreen() {
                                     if (request.isForMainFrame) {
                                         browserMessage = "页面返回 HTTP ${errorResponse.statusCode}(url=${request.url})"
                                     }
+                                }
+
+                                /** 证书异常:只报告,不擅自放行(避免中间人窃取登录口令) */
+                                override fun onReceivedSslError(
+                                    view: WebView,
+                                    handler: android.webkit.SslErrorHandler,
+                                    error: android.net.http.SslError
+                                ) {
+                                    handler.cancel()
+                                    browserMessage = "证书校验失败:${error.primaryError} " +
+                                        "url=${error.url}(已拒绝加载,未放行)"
                                 }
                             }
                             webChromeClient = object : WebChromeClient() {
