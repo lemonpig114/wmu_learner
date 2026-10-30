@@ -7,7 +7,7 @@
 课伴 KeBan：面向温州医科大学学生的安卓课程助手。
 - 第一阶段 ✅：四页面、Room 本地待办、内置浏览器、首个可安装 APK、Git 版本管理
 - 第二阶段 ✅：解析核心（真实文件单测）+ 导入流程（选 PDF → 解析 → 预览校正 → 确认保存）+ 周课表网格 + 手动增删改；剩余细节：节次时间表设置、「清空课表」入口、待办项转为周课表着色优化
-- 第三阶段 ☐：教务入口登录与课表 PDF 下载（入口已确认：`jwxt.wmu.edu.cn/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html?gnmkdm=N2151&layout=default`）
+- 第三阶段 🔄：教务入口登录与课表 PDF 下载 —— **统一身份认证(SSO)自动登录 + 课表 PDF 自动获取已实现**(实测确认首次登录无需验证码),待真机用真实账号验证;入口:`jwxt.wmu.edu.cn/sso/jziotlogin` → `authserver.wmu.edu.cn/authserver/login`
 - 第四阶段 ☐：真机验证与交付
 - 不在本期：学习通 / 知到 / 在浙学接入、AI 通知
 

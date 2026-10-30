@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全策略:默认仅允许 HTTPS。
+  学校统一身份认证登录成功后,CAS 会以 http 协议回跳教务域名(实测跳转):
+    authserver.wmu.edu.cn/authserver/login?service=http://jwxt.wmu.edu.cn/sso/jziotlogin
+  因此仅对这两个校园域名放行明文,其余域名一律仍要求 HTTPS。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">jwxt.wmu.edu.cn</domain>
+        <domain includeSubdomains="false">authserver.wmu.edu.cn</domain>
+    </domain-config>
+</network-security-config>

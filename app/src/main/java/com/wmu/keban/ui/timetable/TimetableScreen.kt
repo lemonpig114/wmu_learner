@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,6 +32,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,17 +63,21 @@ import com.wmu.keban.data.CourseWithSlots
 import com.wmu.keban.data.Graph
 import com.wmu.keban.data.ImportRecord
 import com.wmu.keban.data.TimetableAssembler
+import com.wmu.keban.jwxt.JwxtClient
 import com.wmu.keban.pdf.AndroidPdfTextExtractor
 import com.wmu.keban.pdf.ParsedSlot
 import com.wmu.keban.pdf.ParsedTimetable
 import com.wmu.keban.pdf.Weeks
 import com.wmu.keban.pdf.WmuTimetableParser
+import com.wmu.keban.security.SecureStore
 import com.wmu.keban.util.Dates
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 
 private val DAY_LABELS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 private const val MAX_SECTION = 22
@@ -99,6 +105,14 @@ private data class ImportSession(
     val slots: List<ParsedSlot>
 )
 
+/** 自动获取结果(含诊断信息,便于据实排查) */
+private data class AutoOutcome(
+    val ok: Boolean,
+    val bytes: ByteArray?,
+    val message: String,
+    val diagnostic: String
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TimetableScreen() {
@@ -119,6 +133,65 @@ fun TimetableScreen() {
     var detailCourse by remember { mutableStateOf<CourseWithSlots?>(null) }
     var editBasicCourse by remember { mutableStateOf<CourseWithSlots?>(null) }
     var addManual by remember { mutableStateOf(false) }
+    var autoFetching by remember { mutableStateOf(false) }
+    var diagnostic by remember { mutableStateOf<String?>(null) }
+    var showDiagnostic by remember { mutableStateOf(false) }
+
+    /** 自动获取:本机已配置的教务账号 → 统一身份认证登录 → 取课表 PDF → 解析 → 进入预览 */
+    fun startAutoFetch() {
+        val account = SecureStore.load(context, SecureStore.KIND_ACCOUNT)
+        val password = SecureStore.load(context, SecureStore.KIND_PASSWORD)
+        if (account.isNullOrBlank() || password.isNullOrBlank()) {
+            banner = "请先在「我的」→「教务账号」里配置学号与密码(加密仅存本机)"
+            return
+        }
+        autoFetching = true
+        banner = null
+        scope.launch {
+            val out = withContext(Dispatchers.IO) {
+                val client = JwxtClient()
+                val login = client.login(account, password)
+                if (!login.ok) {
+                    AutoOutcome(false, null, "登录失败:${login.message}", client.diagnostic())
+                } else {
+                    val pdf = client.fetchTimetablePdf()
+                    AutoOutcome(pdf.ok, pdf.bytes, pdf.message, client.diagnostic())
+                }
+            }
+            autoFetching = false
+            diagnostic = out.diagnostic
+            val bytes = out.bytes
+            if (out.ok && bytes != null) {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val tmp = File(context.cacheDir, "auto_timetable.pdf")
+                        tmp.writeBytes(bytes)
+                        try {
+                            WmuTimetableParser.parse(AndroidPdfTextExtractor.extract(tmp))
+                        } finally {
+                            tmp.delete()
+                        }
+                    }
+                }.fold(
+                    onSuccess = { parsed ->
+                        if (parsed.slots.isEmpty()) {
+                            banner = "已获取课表文件,但未识别出条目:" + (parsed.warnings.firstOrNull() ?: "")
+                        } else {
+                            session = ImportSession("教务自动获取.pdf", TimetableAssembler.sha256("auto"), parsed, parsed.slots)
+                            duplicateOf = withContext(Dispatchers.IO) {
+                                repo.findSameImport(TimetableAssembler.signature(parsed.slots))
+                            }
+                        }
+                    },
+                    onFailure = { e ->
+                        banner = "获取到的文件解析失败:${e.message ?: e.javaClass.simpleName}"
+                    }
+                )
+            } else {
+                banner = "自动获取失败:${out.message}(可点「诊断」查看详情)"
+            }
+        }
+    }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -216,9 +289,12 @@ fun TimetableScreen() {
             TopAppBar(
                 title = { Text("课表") },
                 actions = {
+                    TextButton(onClick = { startAutoFetch() }, enabled = !parsing && !autoFetching) {
+                        Text(if (autoFetching) "获取中…" else "自动获取")
+                    }
                     TextButton(
                         onClick = { picker.launch(arrayOf("application/pdf")) },
-                        enabled = !parsing
+                        enabled = !parsing && !autoFetching
                     ) { Text(if (parsing) "解析中…" else "导入") }
                 }
             )
@@ -238,6 +314,9 @@ fun TimetableScreen() {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(msg, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        if (diagnostic != null) {
+                            TextButton(onClick = { showDiagnostic = true }) { Text("诊断") }
+                        }
                         TextButton(onClick = { banner = null }) { Text("知道了") }
                     }
                 }
@@ -261,6 +340,12 @@ fun TimetableScreen() {
                                 onClick = { picker.launch(arrayOf("application/pdf")) },
                                 enabled = !parsing
                             ) { Text(if (parsing) "正在解析…" else "选择课表 PDF") }
+                            TextButton(
+                                onClick = { startAutoFetch() },
+                                enabled = !parsing && !autoFetching
+                            ) {
+                                Text(if (autoFetching) "正在自动获取…" else "自动获取课表(需先在「我的」配置教务账号)")
+                            }
                             if (parsing) {
                                 Text("首次解析需要几秒,请稍候", style = MaterialTheme.typography.bodySmall)
                             }
@@ -270,6 +355,7 @@ fun TimetableScreen() {
             } else {
                 WeekSelector(
                     week = week,
+                    semesterStart = semesterStart,
                     onWeekChange = { week = it },
                     courseCount = courses.size,
                     onShowAll = { week = null }
@@ -359,6 +445,21 @@ fun TimetableScreen() {
         )
     }
 
+    if (showDiagnostic) {
+        AlertDialog(
+            onDismissRequest = { showDiagnostic = false },
+            title = { Text("同步诊断信息") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(diagnostic ?: "", fontSize = 11.sp)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDiagnostic = false }) { Text("关闭") }
+            }
+        )
+    }
+
     if (addManual) {
         SlotEditorDialog(
             initial = SlotEdit("", 1, 1, 2, "1-16周", "", ""),
@@ -425,23 +526,47 @@ private fun parsePickedPdf(context: android.content.Context, uri: Uri): Result<P
 @Composable
 private fun WeekSelector(
     week: Int?,
+    semesterStart: Long?,
     onWeekChange: (Int?) -> Unit,
     courseCount: Int,
     onShowAll: () -> Unit
 ) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        TextButton(onClick = { onWeekChange(((week ?: 1) - 1).coerceAtLeast(1)) }) { Text("‹") }
-        Text(
-            if (week == null) "全部周次" else "第 $week 周",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.Center
-        )
-        TextButton(onClick = { onWeekChange(((week ?: 1) + 1).coerceAtMost(30)) }) { Text("›") }
-        TextButton(onClick = onShowAll) { Text(if (week == null) "共 $courseCount 门" else "全部") }
+    val rangeText = remember(week, semesterStart) {
+        if (week == null || semesterStart == null) null
+        else {
+            val start = LocalDate.ofEpochDay(semesterStart).plusWeeks((week - 1).toLong())
+            val md = DateTimeFormatter.ofPattern("M/d")
+            "${start.format(md)} - ${start.plusDays(6).format(md)}"
+        }
+    }
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = { onWeekChange(((week ?: 1) - 1).coerceAtLeast(1)) }) {
+                Text("‹", fontSize = 20.sp)
+            }
+            Column(
+                Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    if (week == null) "全部周次" else "第 $week 周",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    rangeText ?: "共 $courseCount 门课程",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TextButton(onClick = { onWeekChange(((week ?: 1) + 1).coerceAtMost(30)) }) {
+                Text("›", fontSize = 20.sp)
+            }
+            TextButton(onClick = onShowAll) { Text(if (week == null) "本周" else "全部") }
+        }
     }
 }
 
@@ -472,67 +597,107 @@ private fun WeekGrid(
         courses.mapIndexed { i, c -> c.course.id to palette[i % palette.size] }.toMap()
     }
 
-    Row(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .horizontalScroll(rememberScrollState())
-    ) {
-        // 节次列(顶部留出与星期表头等高的空位,保证横向对齐)
-        Column(Modifier.width(SEC_W)) {
-            Box(Modifier.height(HEADER_H))
-            (1..maxSection).forEach { s ->
-                Box(Modifier.height(ROW_H), contentAlignment = Alignment.Center) {
-                    Text("$s", style = MaterialTheme.typography.labelSmall)
+    Column(Modifier.fillMaxSize()) {
+        val todayDow = remember { LocalDate.now().dayOfWeek.value } // 1=周一 .. 7=周日
+
+        // 星期表头(今日高亮);7 天按权重平分宽度,保证同屏不横滑
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.width(SEC_W))
+            (1..7).forEach { d ->
+                val isToday = d == todayDow
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Surface(
+                        color = if (isToday) MaterialTheme.colorScheme.primary else Color.Transparent,
+                        shape = RoundedCornerShape(50)
+                    ) {
+                        Text(
+                            DAY_LABELS[d - 1],
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (isToday) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isToday) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                        )
+                    }
                 }
             }
         }
-        // 星期列
-        (1..7).forEach { day ->
-            Column(Modifier.width(CELL_W)) {
-                Box(Modifier.height(HEADER_H), contentAlignment = Alignment.Center) {
-                    Text(
-                        DAY_LABELS[day - 1],
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                (1..maxSection).forEach { s ->
-                    val covering = visible.filter {
-                        it.slot.dayOfWeek == day && s in it.slot.startSection..it.slot.endSection
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+
+        // 节次 × 星期 网格(仅纵向滚动)
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 6.dp, vertical = 4.dp)
+        ) {
+            (1..maxSection).forEach { s ->
+                Row(Modifier.fillMaxWidth().height(ROW_H)) {
+                    Box(Modifier.width(SEC_W), contentAlignment = Alignment.Center) {
+                        Text(
+                            "$s",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    val starts = covering.filter { it.slot.startSection == s }
-                    val bg = covering.firstOrNull()?.let { colorOf[it.cws.course.id] }
-                    Box(
-                        Modifier
-                            .height(ROW_H)
-                            .fillMaxWidth()
-                            .padding(1.dp)
-                            .background(
-                                if (covering.isEmpty()) Color.Transparent
-                                else (bg ?: Color(0xFFE0E0E0)).copy(alpha = 0.6f),
-                                RoundedCornerShape(4.dp)
-                            )
-                            .clickable(enabled = starts.isNotEmpty()) {
-                                starts.firstOrNull()?.let { onCourseClick(it.cws) }
-                            }
-                    ) {
-                        if (starts.isNotEmpty()) {
-                            Column(Modifier.fillMaxSize()) {
-                                starts.forEach { item ->
-                                    Text(
-                                        item.cws.course.name,
-                                        fontSize = 9.sp,
-                                        lineHeight = 11.sp,
-                                        maxLines = 3,
-                                        modifier = Modifier.padding(horizontal = 3.dp)
-                                    )
+                    (1..7).forEach { d ->
+                        val covering = visible.filter {
+                            it.slot.dayOfWeek == d && s in it.slot.startSection..it.slot.endSection
+                        }
+                        val starts = covering.filter { it.slot.startSection == s }
+                        val isToday = d == todayDow
+                        val cellColor = when {
+                            covering.isNotEmpty() ->
+                                (colorOf[covering.first().cws.course.id] ?: Color(0xFFD3E4FF))
+                                    .copy(alpha = if (starts.isEmpty()) 0.35f else 0.95f)
+                            isToday -> MaterialTheme.colorScheme.primary.copy(alpha = 0.07f)
+                            else -> MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.7f)
+                        }
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .padding(1.dp)
+                                .background(cellColor, RoundedCornerShape(6.dp))
+                                .clickable(enabled = starts.isNotEmpty()) {
+                                    starts.firstOrNull()?.let { onCourseClick(it.cws) }
+                                }
+                        ) {
+                            if (starts.isNotEmpty()) {
+                                Column(
+                                    Modifier.fillMaxSize().padding(horizontal = 3.dp, vertical = 2.dp)
+                                ) {
+                                    starts.forEach { item ->
+                                        Text(
+                                            item.cws.course.name,
+                                            fontSize = 10.sp,
+                                            lineHeight = 11.sp,
+                                            maxLines = 2,
+                                            fontWeight = FontWeight.Medium,
+                                            color = Color(0xFF12314F)
+                                        )
+                                        val room = item.slot.room
+                                        if (!room.isNullOrBlank() && room.length <= 7) {
+                                            Text(
+                                                room,
+                                                fontSize = 8.sp,
+                                                lineHeight = 9.sp,
+                                                maxLines = 1,
+                                                color = Color(0xFF3C5A75)
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            Spacer(Modifier.height(10.dp))
         }
     }
 }

@@ -2,16 +2,19 @@ package com.wmu.keban.ui.profile
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -25,8 +28,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.wmu.keban.data.Graph
+import com.wmu.keban.security.SecureStore
 import com.wmu.keban.ui.common.SectionCard
 import com.wmu.keban.util.Dates
 import kotlinx.coroutines.launch
@@ -41,6 +46,10 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
     val semesterStart by repo.semesterStart.collectAsState(initial = null)
     val scope = rememberCoroutineScope()
     var pickSemester by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    var account by remember { mutableStateOf(SecureStore.load(context, SecureStore.KIND_ACCOUNT)) }
+    var showCredDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("我的") }) }
@@ -65,6 +74,31 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
                 )
                 TextButton(onClick = { pickSemester = true }) {
                     Text(if (semesterStart == null) "设置学期起始日" else "修改学期起始日")
+                }
+            }
+
+            SectionCard("教务账号(自动获取课表)") {
+                Text(
+                    if (account.isNullOrBlank()) "未配置" else "已配置:学号 ****" + account!!.takeLast(4),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    "配置后,「课表」页点「自动获取」即可自动登录学校统一身份认证并拉取课表 PDF。\n" +
+                        "密码经 Android Keystore 加密后仅保存在本机;不写日志、不上传、可随时清除。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row {
+                    TextButton(onClick = { showCredDialog = true }) {
+                        Text(if (account.isNullOrBlank()) "配置账号" else "修改账号")
+                    }
+                    if (!account.isNullOrBlank()) {
+                        TextButton(onClick = {
+                            SecureStore.clear(context, SecureStore.KIND_ACCOUNT)
+                            SecureStore.clear(context, SecureStore.KIND_PASSWORD)
+                            account = null
+                        }) { Text("清除") }
+                    }
                 }
             }
 
@@ -104,6 +138,45 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
                 )
             }
         }
+    }
+
+    if (showCredDialog) {
+        var user by remember { mutableStateOf(account ?: "") }
+        var pwd by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showCredDialog = false },
+            title = { Text("教务账号") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = user, onValueChange = { user = it },
+                        label = { Text("学号") }, singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = pwd, onValueChange = { pwd = it },
+                        label = { Text("统一身份认证密码") }, singleLine = true
+                    )
+                    Text(
+                        "账号仅用于自动登录学校统一身份认证并获取课表。" +
+                            "密码经 Android Keystore 加密后仅存本机,不写日志、不上传;可随时清除。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = user.isNotBlank() && pwd.isNotBlank(),
+                    onClick = {
+                        SecureStore.save(context, SecureStore.KIND_ACCOUNT, user.trim())
+                        SecureStore.save(context, SecureStore.KIND_PASSWORD, pwd)
+                        account = user.trim()
+                        showCredDialog = false
+                    }
+                ) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { showCredDialog = false }) { Text("取消") } }
+        )
     }
 
     if (pickSemester) {
