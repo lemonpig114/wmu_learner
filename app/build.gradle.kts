@@ -40,6 +40,11 @@ android {
     }
 }
 
+// Room schema 导出(迁移用:生成的 JSON 是迁移 SQL 的权威依据)
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 // 单元测试输出回显(解析调试需要)
 tasks.withType<Test>().configureEach {
     testLogging {

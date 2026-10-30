@@ -97,11 +97,19 @@ object Graph {
     @Volatile
     private var repo: KebanRepo? = null
 
+    @Volatile
+    private var timetable: TimetableRepo? = null
+
     fun init(context: Context): KebanRepo =
         repo ?: synchronized(this) {
-            KebanRepo(AppDatabase.get(context)).also { repo = it }
+            val db = AppDatabase.get(context)
+            timetable = TimetableRepo(db)
+            KebanRepo(db).also { repo = it }
         }
 
     fun repo(): KebanRepo =
         repo ?: error("Graph 未初始化,请先在 MainActivity 调用 init")
+
+    fun timetableRepo(): TimetableRepo =
+        timetable ?: error("Graph 未初始化,请先在 MainActivity 调用 init")
 }
