@@ -133,7 +133,10 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
             }
 
             SectionCard("关于课伴") {
-                Text("版本 0.1.0(第一阶段)", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "版本 ${com.wmu.keban.BuildConfig.VERSION_NAME}(${com.wmu.keban.BuildConfig.VERSION_CODE})",
+                    style = MaterialTheme.typography.bodyMedium
+                )
                 Text(
                     "面向温州医科大学学生的课程助手",
                     style = MaterialTheme.typography.bodySmall,
@@ -142,10 +145,10 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
                 Spacer(Modifier.height(4.dp))
                 Text("阶段进度", style = MaterialTheme.typography.titleSmall)
                 listOf(
-                    "✅ 第一阶段:工程骨架、四页面、本地待办、内置浏览器",
-                    "○ 第二阶段:PDF 课表导入(格式分析已完成,待实现)",
-                    "○ 第三阶段:教务入口登录与课表 PDF 下载",
-                    "○ 第四阶段:真机验证与交付"
+                    "✅ 四页面 + 本地待办 + 内置浏览器",
+                    "✅ PDF 课表导入(解析→预览校正→保存→周课表)",
+                    "🔄 教务自动获取(登录会话复用中,待真机验证)",
+                    "○ 提醒与后续功能"
                 ).forEach {
                     Text(it, style = MaterialTheme.typography.bodySmall)
                 }

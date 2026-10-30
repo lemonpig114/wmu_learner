@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +59,10 @@ import java.io.File
 private const val JWXT_TIMETABLE_PAGE =
     "https://jwxt.wmu.edu.cn/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html?gnmkdm=N2151&layout=default"
 
+/** 桌面版 UA(部分教务页面在手机 UA 下渲染异常时的备用开关) */
+private const val DESKTOP_UA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,6 +77,64 @@ fun BrowserScreen() {
     var lastRequested by remember { mutableStateOf<String?>(null) }
     var browserMessage by remember { mutableStateOf<String?>(null) }
     var currentShownUrl by remember { mutableStateOf(JWXT_TIMETABLE_PAGE) }
+    var diagText by remember { mutableStateOf<String?>(null) }
+    var desktopUa by remember { mutableStateOf(false) }
+
+    /** 用 WebView 的登录会话直接取课表 PDF(不依赖页面上的下载按钮) */
+    fun fetchWithSession() {
+        val cookie = CookieManager.getInstance().getCookie(JWXT_TIMETABLE_PAGE).orEmpty()
+        if (cookie.isBlank()) {
+            browserMessage = "尚未检测到教务登录会话,请先在页面中完成登录(地址栏会显示课表页)"
+            return
+        }
+        browserMessage = "正在用当前登录会话获取课表…"
+        scope.launch {
+            val res = withContext(Dispatchers.IO) {
+                runCatching {
+                    val client = JwxtClient(userAgent = WebSettings.getDefaultUserAgent(ctx))
+                    client.useSession(JwxtClient.parseCookieHeader(cookie))
+                    if (!client.hasSession()) {
+                        return@runCatching null to ("会话无效,教务首页仍跳登录页\n\n" + client.diagnostic())
+                    }
+                    val pdf = client.fetchTimetablePdf()
+                    val bytes = pdf.bytes
+                    if (pdf.ok && bytes != null) {
+                        File(ctx.cacheDir, "pending_import.pdf").apply { writeBytes(bytes) } to pdf.message
+                    } else {
+                        null to (pdf.message + "\n\n" + client.diagnostic())
+                    }
+                }.getOrElse { null to ("获取失败:${it.javaClass.simpleName} ${it.message}") }
+            }
+            val file = res.first
+            if (file != null) {
+                ImportHandoff.pendingPdf = file
+                browserMessage = "已获取课表 PDF,请切到「课表」页确认导入"
+            } else {
+                browserMessage = "未能获取课表 PDF,详情见诊断"
+                diagText = res.second
+            }
+        }
+    }
+
+    /** 会话自检:只列 Cookie 名称(不含值),用于判断登录是否真的成功 */
+    fun selfCheck() {
+        val cm = CookieManager.getInstance()
+        val jwxt = cm.getCookie(JwxtClient.JWXT).orEmpty()
+        val auth = cm.getCookie("https://" + JwxtClient.AUTH_SERVER_HOST).orEmpty()
+        fun names(h: String) = h.split(';').mapNotNull {
+            it.trim().takeIf { s -> s.contains('=') }?.substringBefore('=')
+        }.joinToString(", ").ifBlank { "(无)" }
+        val loggedIn = currentShownUrl.contains("xskbcx") ||
+            currentShownUrl.contains("index_initMenu") ||
+            currentShownUrl.contains("/jwglxt/") && !currentShownUrl.contains("login")
+        diagText = buildString {
+            append("当前地址:${currentShownUrl}\n\n")
+            append("jwxt.wmu.edu.cn Cookie:${names(jwxt)}\n")
+            append("authserver Cookie:${names(auth)}\n\n")
+            append(if (loggedIn) "判断:看起来已进入教务内页(登录可能已成功)" else "判断:仍在登录相关页面(登录可能未完成)")
+            append("\n\n提示:只有出现 JSESSIONID 之类的教务会话 Cookie 才算登录成功。")
+        }
+    }
 
     /** 拦截网页下载:只接受 PDF,取出后交给课表页导入(复用 WebView 的登录会话) */
     fun handleDownload(url: String, mime: String?, disposition: String?) {
@@ -138,8 +202,22 @@ fun BrowserScreen() {
             ) {
                 TextButton(onClick = { webView?.goBack() }, enabled = canGoBack) { Text("‹ 后退") }
                 TextButton(onClick = { webView?.reload() }) { Text("刷新") }
+                TextButton(onClick = { fetchWithSession() }) { Text("获取课表") }
+                TextButton(onClick = { selfCheck() }) { Text("自检") }
+                TextButton(onClick = {
+                    desktopUa = !desktopUa
+                    webView?.let { w ->
+                        w.settings.userAgentString = if (desktopUa) DESKTOP_UA else null
+                        w.reload()
+                    }
+                }) { Text(if (desktopUa) "手机版" else "桌面版") }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    currentShownUrl.takeLast(46),
+                    currentShownUrl.takeLast(60),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -274,5 +352,20 @@ fun BrowserScreen() {
                 }
             }
         }
+    }
+
+    diagText?.let { text ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { diagText = null },
+            title = { Text("诊断信息") },
+            text = {
+                Text(
+                    text,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                )
+            },
+            confirmButton = { TextButton(onClick = { diagText = null }) { Text("关闭") } }
+        )
     }
 }

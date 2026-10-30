@@ -83,13 +83,6 @@ import java.time.format.DateTimeFormatter
 
 private val DAY_LABELS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
-/** "a=1; b=2" → Map */
-private fun parseCookieHeader(header: String): Map<String, String> =
-    header.split(';').mapNotNull { part ->
-        val kv = part.trim()
-        if (kv.isEmpty() || !kv.contains('=')) null
-        else kv.substringBefore('=') to kv.substringAfter('=')
-    }.toMap()
 private const val MAX_SECTION = 22
 private val HEADER_H = 28.dp
 private val ROW_H = 40.dp
@@ -182,15 +175,16 @@ fun TimetableScreen() {
     }
 
     /**
-     * 自动获取:复用**内置浏览器**的教务登录会话(登录含图形验证码,只能人工完成一次)
-     * → 取课表页 → 发现导出链接 → 拉 PDF → 解析 → 进入预览。
+     * 自动获取:**优先复用内置浏览器的教务登录会话**(登录在真实浏览器环境完成,不会被风控要求验证码)
+     * → 会话校验 → 取课表页 → 发现导出链接 → 拉 PDF → 解析 → 预览。
+     * 仅在没有会话且配置了账号密码时,才尝试账号密码 SSO 登录(失败一次即停止,不重试以免锁定)。
      */
     fun startAutoFetch() {
         val account = SecureStore.load(context, SecureStore.KIND_ACCOUNT)
         val password = SecureStore.load(context, SecureStore.KIND_PASSWORD)
         val cookieHeader = CookieManager.getInstance().getCookie(JwxtClient.JWXT).orEmpty()
-        if (account.isNullOrBlank() && cookieHeader.isBlank()) {
-            banner = "请先在「我的」配置教务账号(尝试全自动登录),或先用「内置浏览器」登录一次"
+        if (cookieHeader.isBlank() && (account.isNullOrBlank() || password.isNullOrBlank())) {
+            banner = "未检测到教务登录会话。请到「我的」→「打开内置浏览器登录」登录一次(登录后会话会保留)"
             return
         }
         autoFetching = true
@@ -200,18 +194,22 @@ fun TimetableScreen() {
                 val client = JwxtClient(userAgent = android.webkit.WebSettings.getDefaultUserAgent(context))
                 var note = ""
                 var sessionOk = false
-                // ① 优先尝试账号密码自动登录(服务端要求验证码时会明确告知)
-                if (!account.isNullOrBlank() && !password.isNullOrBlank()) {
-                    val login = client.login(account, password)
-                    note = login.message
-                    sessionOk = login.ok
+                // ① 优先:复用内置浏览器已建立的登录会话
+                if (cookieHeader.isNotBlank()) {
+                    client.useSession(JwxtClient.parseCookieHeader(cookieHeader))
+                    sessionOk = client.hasSession()
+                    note = if (sessionOk) "已复用内置浏览器会话" else "内置浏览器会话已失效"
+                } else {
+                    note = "未检测到浏览器登录会话"
                 }
-                // ② 账号路径不可用时,复用内置浏览器的登录会话
-                if (!sessionOk && cookieHeader.isNotBlank()) {
-                    client.useSession(parseCookieHeader(cookieHeader))
-                    if (client.hasSession()) {
+                // ② 无有效会话时,才尝试账号密码登录(仅一次)
+                if (!sessionOk && !account.isNullOrBlank() && !password.isNullOrBlank()) {
+                    val login = client.login(account, password)
+                    if (login.ok) {
                         sessionOk = true
-                        note = if (note.isBlank()) "已复用内置浏览器会话" else "$note;已改用内置浏览器会话"
+                        note = "账号密码登录成功"
+                    } else {
+                        note = "$note;$login.message".trimStart(';')
                     }
                 }
                 if (!sessionOk) {

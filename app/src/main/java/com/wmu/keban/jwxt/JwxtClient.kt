@@ -41,6 +41,14 @@ class JwxtClient(
         const val TIMETABLE_PAGE =
             "/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html?gnmkdm=N2151&layout=default"
 
+        /** "a=1; b=2" → Map(WebView Cookie 头 → 客户端 Cookie 表) */
+        fun parseCookieHeader(header: String): Map<String, String> =
+            header.split(';').mapNotNull { part ->
+                val kv = part.trim()
+                if (kv.isEmpty() || !kv.contains('=')) null
+                else kv.substringBefore('=') to kv.substringAfter('=')
+            }.toMap()
+
         private const val UA =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
     }
@@ -52,6 +60,10 @@ class JwxtClient(
     private fun log(s: String) {
         diag += s
     }
+
+    /** 会话诊断:只列 Cookie **名称**,不含任何值(值可能等同凭据) */
+    private fun cookieNames(host: String): String =
+        cookiesByHost[host]?.keys?.joinToString(",")?.ifBlank { "(空)" } ?: "(无)"
 
     fun diagnostic(): String = diag.joinToString("\n")
 
@@ -165,10 +177,17 @@ class JwxtClient(
     class LoginOutcome(val ok: Boolean, val message: String)
 
     fun login(username: String, password: String): LoginOutcome {
+        // 与真实浏览器一致:先落地教务登录页(建立 jwxt 会话与路由 Cookie),再进入统一身份认证。
+        // 直接空手跳 SSO 会被服务端判为可疑会话(实测表现为"要求图形验证码")。
+        val primed = runCatching { request("$JWXT/jwglxt/xtgl/login_slogin.html", "GET", null) }.getOrNull()
+        log("⓪ 预热教务会话:HTTP ${primed?.code ?: "-"},cookie=${cookieNames(URI(JWXT).host)}")
+
         log("① 访问教务 SSO 入口,获取统一身份认证登录页")
-        val entry = follow(ssoEntry, null)
+        val entry = follow(ssoEntry, "$JWXT/jwglxt/xtgl/login_slogin.html")
         val entryUrl = entry.finalUrl
         log("   最终地址主机:${URI(entryUrl).host}（HTTP ${entry.code}）")
+        log("   cookie:authserver=${cookieNames(AUTH_SERVER_HOST)} jwxt=${cookieNames(URI(JWXT).host)}")
+
         if (entry.code != 200) {
             return LoginOutcome(false, "无法打开统一身份认证登录页(HTTP ${entry.code})")
         }
@@ -183,8 +202,12 @@ class JwxtClient(
         // (用户实测:正常浏览器登录无需验证码;而线程外的匿名抓取被判定可疑时才出现 show() 调用)
         val captchaRequired = Regex("""captchaParent"\)\s*\.\s*show""").containsMatchIn(loginHtml)
         if (captchaRequired) {
-            log("   本次登录被要求图形验证码(服务端风控判定)")
-            return LoginOutcome(false, "本次登录被要求输入图形验证码,可改用「内置浏览器」登录一次")
+            log("   本次会话被服务端要求图形验证码(页面含 captchaParent.show + captchaId)")
+            return LoginOutcome(
+                false,
+                "本次会话被要求图形验证码(服务端按会话/风控判定)。\n" +
+                    "请改用「内置浏览器」登录一次:在浏览器里正常登录不需要验证码,登录后自动获取会复用该会话。"
+            )
         }
         val service = Regex("""[?&]service=([^&"']+)""").find(entryUrl)?.groupValues?.get(1)
 
@@ -243,7 +266,7 @@ class JwxtClient(
     private fun verifySession(): Boolean {
         val r = request("$JWXT/jwglxt/xtgl/index_initMenu.html", "GET", JWXT)
         val ok = r.code == 200 && !r.text.contains("login_slogin")
-        if (!ok) log("   教务首页返回 HTTP ${r.code},长度 ${r.body.size}")
+        log("   教务首页 HTTP ${r.code},长度 ${r.body.size},cookie=${cookieNames(URI(JWXT).host)}")
         return ok
     }
 
@@ -251,7 +274,7 @@ class JwxtClient(
     fun useSession(cookies: Map<String, String>) {
         val jar = cookiesByHost.getOrPut(URI(JWXT).host) { linkedMapOf() }
         jar.putAll(cookies)
-        log("使用内置浏览器会话(Cookie ${cookies.size} 项)")
+        log("使用内置浏览器会话(${cookies.size} 项:${cookies.keys.joinToString(",")})")
     }
 
     fun hasSession(): Boolean = verifySession()
