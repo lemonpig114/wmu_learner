@@ -43,6 +43,7 @@ import com.wmu.keban.data.ImportHandoff
 import com.wmu.keban.jwxt.JwxtClient
 import com.wmu.keban.ui.common.EmptyHint
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -259,6 +260,127 @@ fun BrowserScreen() {
     }
 
     /**
+     * 在页面内挂钩:捕获页面**自己**发出的表单提交 / XHR。
+     * 只记录方法、地址与字段;字段值仅用于原样重放,不写入诊断。
+     * 动机:课表页「输出 PDF」发出的是 POST,而下载拦截只拿得到 URL、拿不到请求体。
+     */
+    fun installCaptureHooks(w: WebView) {
+        val js = """
+            (function(){
+              if(window.__kbHook) return 'ok';
+              window.__kbHook=true; window.__kbForm=null; window.__kbXhr=null;
+              try{
+                var os=HTMLFormElement.prototype.submit;
+                HTMLFormElement.prototype.submit=function(){
+                  try{
+                    var f=this,o={action:f.getAttribute('action')||location.href,
+                      method:(f.getAttribute('method')||'GET').toUpperCase(),fields:{}};
+                    var es=f.elements;
+                    for(var i=0;i<es.length;i++){var e=es[i];if(!e.name)continue;
+                      if(e.type==='checkbox'||e.type==='radio'){if(e.checked)o.fields[e.name]=e.value;}
+                      else o.fields[e.name]=e.value;}
+                    window.__kbForm=JSON.stringify(o);
+                  }catch(e){}
+                  return os.apply(this,arguments);
+                };
+              }catch(e){}
+              try{
+                var oo=XMLHttpRequest.prototype.open, se=XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.open=function(m,u){
+                  this.__kbM=(m||'GET').toUpperCase(); this.__kbU=String(u);
+                  return oo.apply(this,arguments);};
+                XMLHttpRequest.prototype.send=function(b){
+                  try{
+                    if(this.__kbU && /pdf|print|export|shcpdf|drdc|kbcx/i.test(this.__kbU))
+                      window.__kbXhr=JSON.stringify({method:this.__kbM,url:this.__kbU,
+                        body:(typeof b==='string'?b:null)});
+                  }catch(e){}
+                  return se.apply(this,arguments);};
+              }catch(e){}
+              return 'hooked';
+            })()
+        """.trimIndent()
+        w.evaluateJavascript(js, null)
+    }
+
+    /** 读取页面内捕获到的真实导出请求,并按原样重放(同方法、同地址、同字段) */
+    fun captureAndReplayExport() {
+        val w = webView
+        if (w == null) {
+            browserMessage = "页面尚未就绪"
+            return
+        }
+        w.evaluateJavascript(
+            "(function(){return JSON.stringify({form:window.__kbForm||null,xhr:window.__kbXhr||null});})()"
+        ) { raw ->
+            val obj = runCatching {
+                org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
+            }.getOrNull()
+            val formStr = obj?.optString("form")?.takeIf { it.isNotBlank() && it != "null" }
+            val xhrStr = obj?.optString("xhr")?.takeIf { it.isNotBlank() && it != "null" }
+            if (formStr == null && xhrStr == null) {
+                browserMessage = "未捕获到导出请求:请先在页面上点一次「输出 PDF」"
+                return@evaluateJavascript
+            }
+            var url = ""
+            var method = "POST"
+            var fields: Map<String, String>? = null
+            var rawBody: String? = null
+            var ajax = false
+            val names = StringBuilder()
+            if (formStr != null) {
+                val f = org.json.JSONObject(formStr)
+                url = f.optString("action")
+                method = f.optString("method", "POST").ifBlank { "POST" }
+                val fm = linkedMapOf<String, String>()
+                f.optJSONObject("fields")?.let { fo -> fo.keys().forEach { k -> fm[k] = fo.optString(k) } }
+                fields = fm
+                names.append("捕获到页面表单提交\n地址:${safeAddress(url)}\n方法:$method\n")
+                names.append("字段名(${fm.size}):${fm.keys.joinToString(", ")}\n(字段值不上报)\n")
+            } else if (xhrStr != null) {
+                val x = org.json.JSONObject(xhrStr)
+                url = x.optString("url")
+                method = x.optString("method", "POST").ifBlank { "POST" }
+                rawBody = x.optString("body").takeIf { it.isNotBlank() && it != "null" }
+                ajax = true
+                names.append("捕获到页面 XHR\n地址:${safeAddress(url)}\n方法:$method\n")
+                names.append(
+                    "请求体字段名:" +
+                        (rawBody?.split('&')?.map { it.substringBefore('=') }?.joinToString(", ") ?: "(空)") +
+                        "\n(字段值不上报)\n"
+                )
+            }
+            val absUrl = if (url.startsWith("http")) url else JwxtClient.JWXT + url
+            browserMessage = "正在按页面真实请求重放导出…"
+            scope.launch {
+                val out = withContext(Dispatchers.IO) {
+                    runCatching {
+                        JwxtClient(
+                            userAgent = JwxtClient.wmuUserAgent(WebSettings.getDefaultUserAgent(ctx))
+                        ).replayExport(
+                            absUrl, method, fields, rawBody, ajax,
+                            CookieManager.getInstance().getCookie(absUrl), currentShownUrl
+                        )
+                    }.getOrElse {
+                        JwxtClient.ReplayOutcome(false, null, "重放失败:${it.javaClass.simpleName} ${it.message}")
+                    }
+                }
+                val bytes = out.bytes
+                if (out.ok && bytes != null) {
+                    val f = withContext(Dispatchers.IO) {
+                        File(ctx.cacheDir, "pending_import.pdf").apply { writeBytes(bytes) }
+                    }
+                    ImportHandoff.pendingPdf = f
+                    browserMessage = "已获取课表 PDF,请切到「课表」页确认导入"
+                } else {
+                    browserMessage = "导出未拿到 PDF,详情见诊断"
+                    diagText = names.toString() + "\n" + out.message
+                }
+            }
+        }
+    }
+
+    /**
      * 让页面自己走它的导出流程:点击页面里已存在的导出按钮(证据:课表页有 id="shcPDF" 的按钮)。
      * 不猜接口、不伪造请求 —— 触发后由 DownloadListener 或导航记录接管,拿到的就是网站的真实产物。
      */
@@ -288,7 +410,12 @@ fun BrowserScreen() {
             val res = runCatching {
                 org.json.JSONTokener(raw).nextValue() as String
             }.getOrElse { raw ?: "" }
-            browserMessage = "$res；若没看到下载或跳转,请点「自检」看「最近访问」与「导出相关请求」"
+            browserMessage = "$res;正在捕获导出请求…"
+            // 等页面把导出请求发出去,再读捕获结果并原样重放(拿得到 POST 体,下载拦截拿不到)
+            scope.launch {
+                delay(1500)
+                captureAndReplayExport()
+            }
         }
     }
 
@@ -351,6 +478,7 @@ fun BrowserScreen() {
             }
         }
     }
+
 
     /** 拦截网页下载:只接受 PDF,取出后交给课表页导入(复用 WebView 的登录会话) */
     fun handleDownload(url: String, mime: String?, disposition: String?) {
@@ -541,6 +669,8 @@ fun BrowserScreen() {
                                     canGoBack = view.canGoBack()
                                     currentShownUrl = url ?: currentShownUrl
                                     sizeAuthFrame(view)
+                                    // 教务页装挂钩:用于捕获页面自己发出的导出请求
+                                    if ((url ?: "").contains("jwxt.wmu.edu.cn")) installCaptureHooks(view)
                                 }
 
                                 override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {

@@ -130,7 +130,9 @@ class JwxtClient(
         method: String,
         referer: String?,
         form: Map<String, String>? = null,
-        cookieOverride: String? = null
+        cookieOverride: String? = null,
+        rawBody: String? = null,
+        ajax: Boolean = false
     ): Resp {
         val uri = URI(url)
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -144,16 +146,17 @@ class JwxtClient(
             setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9")
             (cookieOverride ?: cookieHeaderFor(uri.host))?.let { setRequestProperty("Cookie", it) }
             referer?.let { setRequestProperty("Referer", it) }
+            if (ajax) setRequestProperty("X-Requested-With", "XMLHttpRequest")
         }
-        if (form != null) {
+        val payload = rawBody ?: form?.entries?.joinToString("&") {
+            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
+        }
+        if (payload != null) {
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             // 表单 POST 补上 Origin(浏览器会带,部分风控会校验)
             runCatching { conn.setRequestProperty("Origin", "${uri.scheme}://${uri.host}") }
-            val body = form.entries.joinToString("&") {
-                URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
-            }
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
         }
         val code = runCatching { conn.responseCode }.getOrElse { -1 }
         val ct = conn.contentType ?: ""
@@ -348,6 +351,43 @@ class JwxtClient(
             if (r.isPdf) return PdfOutcome(true, r.body, "已获取课表 PDF(${r.body.size} 字节)", list)
         }
         return PdfOutcome(false, null, "找到候选但都未返回 PDF(诊断已记录,可改用网页上的「下载」按钮)", list)
+    }
+
+    /**
+     * 原样重放页面自己发出的导出请求(方法/地址/字段全部来自页面,不是我编的)。
+     * 已实测:课表页「输出 PDF」按钮发出的是 `POST /jwglxt/kbcx/xskbcx_cxXsShcPdf.html`,
+     * 而下载拦截只拿到 URL、拿不到 POST 体 —— 因此改为在页面内捕获真实请求再重放。
+     */
+    class ReplayOutcome(val ok: Boolean, val bytes: ByteArray? = null, val message: String)
+
+    fun replayExport(
+        url: String,
+        method: String,
+        form: Map<String, String>?,
+        rawBody: String?,
+        ajax: Boolean,
+        cookieHeader: String?,
+        referer: String
+    ): ReplayOutcome {
+        val r = runCatching {
+            requestWithCookieHeader(url, method, referer, form, cookieHeader, rawBody, ajax)
+        }.getOrElse {
+            log("   重放失败:${it.javaClass.simpleName} ${it.message}")
+            return ReplayOutcome(false, null, "重放请求失败:${it.javaClass.simpleName}")
+        }
+        log(
+            "   重放 $method ${URI(url).path} → HTTP ${r.code},${r.body.size} 字节," +
+                "${r.contentType}${if (r.isPdf) ",PDF ✓" else ""}"
+        )
+        return if (r.isPdf) {
+            ReplayOutcome(true, r.body, "已获取课表 PDF(${r.body.size} 字节)")
+        } else {
+            ReplayOutcome(
+                false, null,
+                "重放未返回 PDF(HTTP ${r.code},${r.body.size} 字节,${r.contentType.ifBlank { "无类型" }});" +
+                    "首段:${r.text.take(100).replace(Regex("\\s+"), " ")}"
+            )
+        }
     }
 
     /**
