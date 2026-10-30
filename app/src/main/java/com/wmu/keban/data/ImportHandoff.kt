@@ -12,6 +12,13 @@ object ImportHandoff {
     @Volatile
     var pendingPdf: File? = null
 
+    /**
+     * 「一键获取课表」标记:课表页置位后跳转到内置浏览器,
+     * 浏览器加载完课表页即自动执行"点击导出 → 捕获真实请求 → 重放 → 回课表页"。
+     */
+    @Volatile
+    var autoExportRequested: Boolean = false
+
     fun take(): File? {
         val f = pendingPdf
         pendingPdf = null

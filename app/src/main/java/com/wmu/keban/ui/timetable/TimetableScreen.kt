@@ -118,7 +118,7 @@ private data class AutoOutcome(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TimetableScreen() {
+fun TimetableScreen(onOpenBrowser: () -> Unit = {}) {
     val repo = Graph.timetableRepo()
     val kebanRepo = Graph.repo()
     val context = LocalContext.current
@@ -172,6 +172,17 @@ fun TimetableScreen() {
                 onFailure = { e -> banner = "文件解析失败:${e.message ?: e.javaClass.simpleName}" }
             )
         }
+    }
+
+    /**
+     * 一键获取课表:置位交接标记后打开内置浏览器。
+     * 浏览器加载完课表页即自动执行「点击「输出 PDF」→ 捕获网站真实请求 → 原样重放 → 取回 PDF」,
+     * 成功后自动切回本页并弹出解析预览。用户只需点这一下。
+     */
+    fun startOneTapFetch() {
+        banner = null
+        ImportHandoff.autoExportRequested = true
+        onOpenBrowser()
     }
 
     /**
@@ -338,8 +349,8 @@ fun TimetableScreen() {
             TopAppBar(
                 title = { Text("课表") },
                 actions = {
-                    TextButton(onClick = { startAutoFetch() }, enabled = !parsing && !autoFetching) {
-                        Text(if (autoFetching) "获取中…" else "自动获取")
+                    TextButton(onClick = { startOneTapFetch() }, enabled = !parsing && !autoFetching) {
+                        Text("一键获取")
                     }
                     TextButton(
                         onClick = { picker.launch(arrayOf("application/pdf")) },
@@ -381,20 +392,19 @@ fun TimetableScreen() {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("尚未导入课表", style = MaterialTheme.typography.titleLarge)
                             Text(
-                                "步骤:选择教务系统导出的课表 PDF → 解析 → 预览校正 → 确认保存。\n" +
+                                "「一键获取」会自动打开教务课表页并取回课表 PDF(需先登录一次);\n" +
+                                    "也可以自己导出 PDF 后用「选择课表 PDF」导入。\n" +
                                     "解析结果中无法确定的信息会标记为「待确认」,不会自动猜测。",
                                 style = MaterialTheme.typography.bodyMedium
                             )
                             Button(
+                                onClick = { startOneTapFetch() },
+                                enabled = !parsing && !autoFetching
+                            ) { Text("一键获取课表") }
+                            TextButton(
                                 onClick = { picker.launch(arrayOf("application/pdf")) },
                                 enabled = !parsing
                             ) { Text(if (parsing) "正在解析…" else "选择课表 PDF") }
-                            TextButton(
-                                onClick = { startAutoFetch() },
-                                enabled = !parsing && !autoFetching
-                            ) {
-                                Text(if (autoFetching) "正在自动获取…" else "自动获取课表(需先在「我的」配置教务账号)")
-                            }
                             if (parsing) {
                                 Text("首次解析需要几秒,请稍候", style = MaterialTheme.typography.bodySmall)
                             }

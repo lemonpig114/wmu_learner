@@ -75,12 +75,26 @@ fun KebanApp() {
             modifier = Modifier.padding(padding)
         ) {
             composable(Routes.TODAY) { TodayScreen() }
-            composable(Routes.TIMETABLE) { TimetableScreen() }
+            composable(Routes.TIMETABLE) {
+                TimetableScreen(
+                    onOpenBrowser = { navController.navigate(Routes.BROWSER) }
+                )
+            }
             composable(Routes.TODOS) { TodosScreen() }
             composable(Routes.PROFILE) {
                 ProfileScreen(onOpenBrowser = { navController.navigate(Routes.BROWSER) })
             }
-            composable(Routes.BROWSER) { BrowserScreen() }
+            composable(Routes.BROWSER) {
+                BrowserScreen(
+                    onSwitchToTimetable = {
+                        navController.navigate(Routes.TIMETABLE) {
+                            popUpTo(Routes.TODAY) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                )
+            }
         }
     }
 }

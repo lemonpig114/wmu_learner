@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,10 +68,10 @@ private const val DESKTOP_UA =
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BrowserScreen() {
+fun BrowserScreen(onSwitchToTimetable: () -> Unit = {}) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    // 默认打开教务课表查询入口,登录后即可在页面内点击「下载 PDF」
+    // 默认打开教务课表查询入口,登录后即可一键导出 PDF
     var inputUrl by rememberSaveable { mutableStateOf(JWXT_TIMETABLE_PAGE) }
     var currentUrl by rememberSaveable { mutableStateOf(JWXT_TIMETABLE_PAGE) }
     var canGoBack by remember { mutableStateOf(false) }
@@ -79,6 +80,9 @@ fun BrowserScreen() {
     var browserMessage by remember { mutableStateOf<String?>(null) }
     var currentShownUrl by remember { mutableStateOf(JWXT_TIMETABLE_PAGE) }
     var diagText by remember { mutableStateOf<String?>(null) }
+    var exporting by remember { mutableStateOf(false) }
+    var showGuide by remember { mutableStateOf(false) }
+    var autoRun by remember { mutableStateOf(false) }
     val loadIssues = remember { mutableListOf<String>() }
     val navHistory = remember { mutableListOf<String>() }
     val exportHits = remember { mutableListOf<String>() }
@@ -303,11 +307,37 @@ fun BrowserScreen() {
         w.evaluateJavascript(js, null)
     }
 
-    /** 读取页面内捕获到的真实导出请求,并按原样重放(同方法、同地址、同字段) */
-    fun captureAndReplayExport() {
+    /** 兜底:按 GET 直接取一次(拿不到 POST 体时的旧行为) */
+    fun tryGetAsPdf(url: String, onDone: (Boolean) -> Unit) {
+        scope.launch {
+            val file = withContext(Dispatchers.IO) {
+                runCatching {
+                    val cookie = CookieManager.getInstance().getCookie(url)
+                    val bytes = JwxtClient().downloadPdf(url, cookie) ?: return@runCatching null
+                    File(ctx.cacheDir, "pending_import.pdf").apply { writeBytes(bytes) }
+                }.getOrNull()
+            }
+            if (file != null) {
+                ImportHandoff.pendingPdf = file
+                browserMessage = "✅ 已获取课表 PDF"
+                onDone(true)
+            } else {
+                browserMessage = "未取到 PDF(该导出可能只接受 POST,已尝试原样重放)"
+                onDone(false)
+            }
+        }
+    }
+
+    /**
+     * 读取页面内捕获到的真实导出请求,并按原样重放(同方法、同地址、同字段)。
+     * [fallbackUrl] 用于没有捕获到请求时的兜底(例如下载监听给出的 URL,按 GET 试一次)。
+     * [onDone] 回调:true 表示已成功拿到 PDF(无论走哪条路)。
+     */
+    fun captureAndReplayExport(fallbackUrl: String? = null, onDone: (Boolean) -> Unit = {}) {
         val w = webView
         if (w == null) {
-            browserMessage = "页面尚未就绪"
+            if (fallbackUrl == null) browserMessage = "页面尚未就绪"
+            onDone(false)
             return
         }
         w.evaluateJavascript(
@@ -319,7 +349,13 @@ fun BrowserScreen() {
             val formStr = obj?.optString("form")?.takeIf { it.isNotBlank() && it != "null" }
             val xhrStr = obj?.optString("xhr")?.takeIf { it.isNotBlank() && it != "null" }
             if (formStr == null && xhrStr == null) {
-                browserMessage = "未捕获到导出请求:请先在页面上点一次「输出 PDF」"
+                if (fallbackUrl == null) {
+                    browserMessage = "未捕获到导出请求:请先在页面上点一次「输出 PDF」"
+                    onDone(false)
+                } else {
+                    // 兜底:下载监听给的地址,按 GET 试一次(旧行为,拿不到 POST 体)
+                    tryGetAsPdf(fallbackUrl, onDone)
+                }
                 return@evaluateJavascript
             }
             var url = ""
@@ -371,10 +407,92 @@ fun BrowserScreen() {
                         File(ctx.cacheDir, "pending_import.pdf").apply { writeBytes(bytes) }
                     }
                     ImportHandoff.pendingPdf = f
-                    browserMessage = "已获取课表 PDF,请切到「课表」页确认导入"
+                    browserMessage = "✅ 已获取课表 PDF"
+                    onDone(true)
                 } else {
                     browserMessage = "导出未拿到 PDF,详情见诊断"
                     diagText = names.toString() + "\n" + out.message
+                    onDone(false)
+                }
+            }
+        }
+    }
+
+    /** 拿到 PDF 后自动切回课表页(一键流程的收尾) */
+    fun goBackToTimetable() {
+        browserMessage = "✅ 已获取课表 PDF,正在返回课表页…"
+        scope.launch {
+            delay(900)
+            onSwitchToTimetable()
+        }
+    }
+
+    /**
+     * 一键流程:点页面「输出 PDF」→ 轮询等待页面发出真实请求 → 原样重放 → 回课表页。
+     * 轮询而非固定等待:页面可能要先把请求发出去,固定延迟容易过快或过慢。
+     */
+    fun clickExportAndCapture(attempt: Int = 0) {
+        val w = webView
+        if (w == null) {
+            browserMessage = "页面尚未就绪"
+            exporting = false
+            return
+        }
+        if (attempt == 0) {
+            browserMessage = "① 正在点击页面「输出 PDF」…"
+            val js = """
+                (function(){
+                  try{
+                    var b=document.getElementById('shcPDF');
+                    if(b){ b.click(); return '已点击「输出 PDF」(shcPDF)'; }
+                    var all=document.querySelectorAll('button,a,input');
+                    for(var i=0;i<all.length;i++){
+                      var t=(all[i].textContent||all[i].value||'').trim();
+                      if(t.indexOf('PDF')>=0||t.indexOf('导出')>=0||t.indexOf('打印')>=0){
+                        all[i].click(); return '已点击文本匹配按钮:'+t.slice(0,20);
+                      }
+                    }
+                    return '页面上没找到导出按钮';
+                  }catch(e){ return '点击失败:'+e; }
+                })()
+            """.trimIndent()
+            w.evaluateJavascript(js) { raw ->
+                val res = runCatching {
+                    org.json.JSONTokener(raw).nextValue() as String
+                }.getOrElse { raw ?: "" }
+                browserMessage = "① $res"
+                if (res.contains("没找到")) {
+                    // 没看到导出按钮 ⇒ 多半还没登录/不在课表页:直接给指引,不再空转轮询
+                    exporting = false
+                    browserMessage = "未找到「输出 PDF」按钮:请先在本页登录并进入「学生课表查询」页"
+                    showGuide = true
+                    return@evaluateJavascript
+                }
+                scope.launch {
+                    delay(800)
+                    clickExportAndCapture(1)
+                }
+            }
+            return
+        }
+        if (attempt > 12) {
+            exporting = false
+            browserMessage = "未捕获到导出请求。可点「自检」看详情;或点「导入指引」按手动方式导入"
+            return
+        }
+        w.evaluateJavascript(
+            "(function(){return (window.__kbForm||window.__kbXhr)?'captured':'none';})()"
+        ) { raw ->
+            if ((raw ?: "").contains("captured")) {
+                browserMessage = "② 已捕获页面真实导出请求,正在重放…"
+                captureAndReplayExport(null) { ok ->
+                    exporting = false
+                    if (ok) goBackToTimetable()
+                }
+            } else {
+                scope.launch {
+                    delay(500)
+                    clickExportAndCapture(attempt + 1)
                 }
             }
         }
@@ -384,39 +502,11 @@ fun BrowserScreen() {
      * 让页面自己走它的导出流程:点击页面里已存在的导出按钮(证据:课表页有 id="shcPDF" 的按钮)。
      * 不猜接口、不伪造请求 —— 触发后由 DownloadListener 或导航记录接管,拿到的就是网站的真实产物。
      */
+    /** 工具栏入口:一键导出(点击页面「输出 PDF」→ 捕获真实请求 → 重放 → 回课表页) */
     fun clickPageExport() {
-        val w = webView
-        if (w == null) {
-            browserMessage = "页面尚未就绪"
-            return
-        }
-        val js = """
-            (function(){
-              try{
-                var b=document.getElementById('shcPDF');
-                if(b){ b.click(); return '已点击导出按钮(shcPDF)'; }
-                var all=document.querySelectorAll('button,a,input');
-                for(var i=0;i<all.length;i++){
-                  var t=(all[i].textContent||all[i].value||'').trim();
-                  if(t.indexOf('PDF')>=0||t.indexOf('导出')>=0||t.indexOf('打印')>=0){
-                    all[i].click(); return '已点击文本匹配按钮:'+t.slice(0,24);
-                  }
-                }
-                return '页面上没找到导出按钮';
-              }catch(e){ return '点击失败:'+e; }
-            })()
-        """.trimIndent()
-        w.evaluateJavascript(js) { raw ->
-            val res = runCatching {
-                org.json.JSONTokener(raw).nextValue() as String
-            }.getOrElse { raw ?: "" }
-            browserMessage = "$res;正在捕获导出请求…"
-            // 等页面把导出请求发出去,再读捕获结果并原样重放(拿得到 POST 体,下载拦截拿不到)
-            scope.launch {
-                delay(1500)
-                captureAndReplayExport()
-            }
-        }
+        if (exporting) return
+        exporting = true
+        clickExportAndCapture()
     }
 
     /**
@@ -482,34 +572,86 @@ fun BrowserScreen() {
 
     /** 拦截网页下载:只接受 PDF,取出后交给课表页导入(复用 WebView 的登录会话) */
     fun handleDownload(url: String, mime: String?, disposition: String?) {
-
+        // 一键流程已在处理:这里不再重复发起,避免出现"先失败后成功"的两条提示
+        if (exporting) return
         val looksPdf = mime?.contains("pdf", true) == true ||
             url.contains(".pdf", true) ||
             disposition?.contains("pdf", true) == true
-        if (!looksPdf) {
-            browserMessage = "已忽略:只接收 PDF 下载(mime=${mime ?: "未知"})"
-            return
-        }
-        browserMessage = "正在获取课表 PDF…"
-        scope.launch {
-            val file = withContext(Dispatchers.IO) {
-                runCatching {
-                    val cookie = CookieManager.getInstance().getCookie(url)
-                    val bytes = JwxtClient().downloadPdf(url, cookie) ?: return@runCatching null
-                    File(ctx.cacheDir, "pending_import.pdf").apply { writeBytes(bytes) }
-                }.getOrNull()
+        // 是明确的 PDF 直链 → 直接取;否则交给"捕获真实请求并重放"处理
+        // (实测课表导出是 POST,只拿 URL 用 GET 取不到)
+        if (looksPdf) {
+            browserMessage = "检测到 PDF 下载,正在获取…"
+            exporting = true
+            scope.launch {
+                delay(400)
+                captureAndReplayExport(url) { exporting = false }
             }
-            if (file != null) {
-                ImportHandoff.pendingPdf = file
-                browserMessage = "已获取课表 PDF,请切到「课表」页确认导入"
-            } else {
-                browserMessage = "该下载没有返回 PDF(可能链接需重新登录或需在页面内点击导出)"
+        } else {
+            browserMessage = "检测到导出动作,正在按页面真实请求获取…"
+            exporting = true
+            scope.launch {
+                delay(700)
+                captureAndReplayExport(url) { exporting = false }
             }
         }
     }
 
     BackHandler(enabled = canGoBack) {
         webView?.goBack()
+    }
+
+    // 从课表页「一键获取课表」进来的自动流程
+    LaunchedEffect(Unit) {
+        if (ImportHandoff.autoExportRequested) {
+            ImportHandoff.autoExportRequested = false
+            autoRun = true
+            exporting = true
+            if (currentShownUrl.contains("xskbcx")) {
+                browserMessage = "① 正在点击页面「输出 PDF」…"
+                delay(600)
+                clickExportAndCapture()
+            } else {
+                browserMessage = "① 正在打开教务课表页…"
+                currentUrl = JWXT_TIMETABLE_PAGE
+            }
+        }
+    }
+
+    if (showGuide) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showGuide = false },
+            title = { Text("课表导入指引") },
+            text = {
+                Text(
+                    """
+                    【方式一 · 一键获取(推荐)】
+                    1. 先在这里登录学校统一身份认证(学号+密码)
+                    2. 登录成功后停在「学生课表查询」页,能看到课表表格
+                    3. 回到「课表」页点「一键获取课表」 —— 剩下全自动:
+                       点击页面「输出 PDF」→ 捕获网站真实请求 → 重放取回 PDF
+                       → 自动返回课表页并弹出「解析结果预览」
+                    4. 在预览里核对/修正「待确认」条目,点确认保存即可
+
+                    【方式二 · 手动导出(兜底)】
+                    1. 在本页登录后,自己点页面上的「输出 PDF」
+                    2. 若手机弹出下载,本应用会接住并提示"已获取课表 PDF"
+                    3. 切到「课表」页,会自动弹出解析预览
+
+                    【方式三 · 电脑导出】
+                    1. 在电脑教务系统导出课表 PDF,传到手机
+                    2. 「课表」页右上「导入」→ 选择该 PDF
+
+                    【常见问题】
+                    · 提示"未检测到登录会话":回本页重新登录一次(会话可能过期)
+                    · 学生课表查询页需要先选学年/学期并点「查询」,看到表格后再导出
+                    · 失败时可点「自检」查看诊断,并把内容发给开发者
+                    """.trimIndent(),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                )
+            },
+            confirmButton = { TextButton(onClick = { showGuide = false }) { Text("知道了") } }
+        )
     }
 
     Scaffold(
@@ -563,8 +705,9 @@ fun BrowserScreen() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 让页面自己走它的导出流程:点了之后由 DownloadListener 或导航记录接管(不猜接口)
-                TextButton(onClick = { clickPageExport() }) { Text("点页面「导出PDF」") }
+                TextButton(onClick = { clickPageExport() }) { Text("一键导出课表") }
                 TextButton(onClick = { probeTimetableData() }) { Text("取课表数据") }
+                TextButton(onClick = { showGuide = true }) { Text("导入指引") }
             }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp),
@@ -671,6 +814,15 @@ fun BrowserScreen() {
                                     sizeAuthFrame(view)
                                     // 教务页装挂钩:用于捕获页面自己发出的导出请求
                                     if ((url ?: "").contains("jwxt.wmu.edu.cn")) installCaptureHooks(view)
+                                    // 一键流程:课表页加载完成后自动开始点击导出
+                                    if (autoRun && (url ?: "").contains("xskbcx")) {
+                                        autoRun = false
+                                        scope.launch {
+                                            delay(1800)
+                                            browserMessage = "① 正在点击页面「输出 PDF」…"
+                                            clickExportAndCapture()
+                                        }
+                                    }
                                 }
 
                                 override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
