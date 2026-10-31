@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -44,8 +45,15 @@ import java.time.ZoneId
 fun ProfileScreen(onOpenBrowser: () -> Unit) {
     val repo = Graph.repo()
     val semesterStart by repo.semesterStart.collectAsState(initial = null)
+    val sectionTimes by repo.sectionTimes.collectAsState(initial = emptyMap())
+    val courseCount by Graph.timetableRepo().coursesWithSlots
+        .collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var pickSemester by remember { mutableStateOf(false) }
+    var pickSectionTimes by remember { mutableStateOf(false) }
+    var clearImported by remember { mutableStateOf(false) }
+    var clearAllConfirm by remember { mutableStateOf(false) }
+    var toast by remember { mutableStateOf<String?>(null) }
 
     val context = LocalContext.current
 
@@ -117,6 +125,34 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
                         android.webkit.CookieManager.getInstance().removeAllCookies(null)
                         android.webkit.CookieManager.getInstance().flush()
                     }) { Text("清除登录会话") }
+                }
+            }
+
+            SectionCard("节次时间表") {
+                Text(
+                    if (sectionTimes.isEmpty()) "未设置" else "已设置 ${sectionTimes.size} 个节次",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    "课表 PDF 只给出节次(如 1-2 节),不含具体钟点;填写后「今天」页会显示上课时间。\n" +
+                        "未填写的节次只显示节次,不会猜测时间。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(onClick = { pickSectionTimes = true }) {
+                    Text(if (sectionTimes.isEmpty()) "设置节次时间" else "修改节次时间")
+                }
+            }
+
+            SectionCard("课表数据") {
+                Text(
+                    "清空课表只会删除课程与导入记录,**不影响「待办」**。清空后可以用「一键获取」重新导入。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row {
+                    TextButton(onClick = { clearImported = true }) { Text("清空导入的课表(保留手动添加)") }
+                    TextButton(onClick = { clearAllConfirm = true }) { Text("清空全部课程") }
                 }
             }
 
@@ -210,6 +246,129 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
             }
         )
     }
+
+    if (pickSectionTimes) {
+        SectionTimesDialog(
+            initial = sectionTimes,
+            onDismiss = { pickSectionTimes = false },
+            onSave = { table ->
+                scope.launch { repo.setSectionTimes(table) }
+                pickSectionTimes = false
+            }
+        )
+    }
+
+    if (clearImported) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { clearImported = false },
+            title = { Text("清空导入的课表?") },
+            text = {
+                Text(
+                    "将删除从教务导入的课程与导入记录,**保留手动添加的课程**;「待办」不受影响。\n" +
+                        "此操作不可撤销。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        Graph.timetableRepo().clearImported()
+                        toast = "已清空导入的课表"
+                    }
+                    clearImported = false
+                }) { Text("清空") }
+            },
+            dismissButton = { TextButton(onClick = { clearImported = false }) { Text("取消") } }
+        )
+    }
+
+    if (clearAllConfirm) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { clearAllConfirm = false },
+            title = { Text("清空全部课程?") },
+            text = {
+                Text(
+                    "将删除**全部课程**(含手动添加的)与导入记录;「待办」不受影响。\n" +
+                        "此操作不可撤销。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        Graph.timetableRepo().clearAll()
+                        toast = "已清空全部课程"
+                    }
+                    clearAllConfirm = false
+                }) { Text("全部清空") }
+            },
+            dismissButton = { TextButton(onClick = { clearAllConfirm = false }) { Text("取消") } }
+        )
+    }
+
+    toast?.let { msg ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { toast = null },
+            title = { Text("提示") },
+            text = { Text(msg, style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = { TextButton(onClick = { toast = null }) { Text("知道了") } }
+        )
+    }
+}
+
+/**
+ * 节次时间表编辑:一行一节,`节次 开始-结束`(如 `1 08:00-08:45`)。
+ * 用多行文本而不是 22×2 输入框:输入更少、键盘更好用,也便于整表复制粘贴。
+ */
+@Composable
+private fun SectionTimesDialog(
+    initial: com.wmu.keban.util.SectionTimes.Table,
+    onDismiss: () -> Unit,
+    onSave: (com.wmu.keban.util.SectionTimes.Table) -> Unit
+) {
+    var text by remember {
+        mutableStateOf(
+            com.wmu.keban.util.SectionTimes.toLines(initial).ifBlank { "" }
+        )
+    }
+    val parsed = com.wmu.keban.util.SectionTimes.fromLines(text)
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("节次时间表") },
+        text = {
+            Column {
+                Text(
+                    "每行一节,格式:`节次 开始-结束`,例如\n" +
+                        "1 08:00-08:45\n2 08:55-09:40\n" +
+                        "只需填你用得上的节次;空行与 # 开头的行会被忽略。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.material3.OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth().height(200.dp),
+                    placeholder = { Text("1 08:00-08:45") },
+                    singleLine = false
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (parsed.isEmpty()) {
+                        "当前可解析出 0 个节次(保存后为「未设置」)"
+                    } else {
+                        "当前可解析出 ${parsed.size} 个节次:第 ${parsed.keys.sorted().joinToString(",")} 节"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(parsed) }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

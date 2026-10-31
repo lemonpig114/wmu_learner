@@ -62,6 +62,20 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
     }
 
     /**
+     * 节次时间表(第 n 节 → 开始/结束钟点)。
+     * 未设置过即为空表 —— 界面据此显示"时间未设置",不猜测具体钟点。
+     */
+    val sectionTimes: Flow<com.wmu.keban.util.SectionTimes.Table> =
+        db.settingDao().observe(KEY_SECTION_TIMES)
+            .map { com.wmu.keban.util.SectionTimes.parse(it?.value) }
+
+    suspend fun setSectionTimes(table: com.wmu.keban.util.SectionTimes.Table) {
+        db.settingDao().put(
+            Setting(KEY_SECTION_TIMES, com.wmu.keban.util.SectionTimes.serialize(table))
+        )
+    }
+
+    /**
      * 示例数据只在首次启动写入一次(用 settings 里的标记位记录),
      * 避免"用户删掉示例后重启又被写回来"的行为缺陷。
      * 示例数据 isSample = true,UI 明确标注,可删除;已有真实数据时不再写入。
@@ -87,6 +101,8 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
     companion object {
         const val KEY_SEMESTER_START = "semester_start_epoch_day"
         const val KEY_SAMPLE_SEEDED = "sample_seeded"
+        /** 节次时间表,格式 `1=08:00-08:45;2=08:55-09:40` */
+        const val KEY_SECTION_TIMES = "section_times"
     }
 }
 
