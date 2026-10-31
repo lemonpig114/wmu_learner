@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -28,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -46,10 +49,13 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
     val repo = Graph.repo()
     val semesterStart by repo.semesterStart.collectAsState(initial = null)
     val sectionTimes by repo.sectionTimes.collectAsState(initial = emptyMap())
+    val autoFillLogin by repo.autoFillLogin.collectAsState(initial = true)
+    val autoSubmitLogin by repo.autoSubmitLogin.collectAsState(initial = true)
     val courseCount by Graph.timetableRepo().coursesWithSlots
         .collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var pickSemester by remember { mutableStateOf(false) }
+    var pickCurrentWeek by remember { mutableStateOf(false) }
     var pickSectionTimes by remember { mutableStateOf(false) }
     var clearImported by remember { mutableStateOf(false) }
     var clearAllConfirm by remember { mutableStateOf(false) }
@@ -73,31 +79,57 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
         ) {
             SectionCard("学期设置") {
                 Text(
-                    "学期起始日:" + (semesterStart?.let { Dates.dateOnly(it) } ?: "未设置"),
+                    "学期起始日(第 1 周周一):" + (semesterStart?.let { Dates.dateOnly(it) } ?: "未设置"),
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    "设置后,「今天」页将显示当前教学周。",
+                    "设置后,「今天」和「课表」页都会按今天的日期自动定位到当前教学周。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                TextButton(onClick = { pickSemester = true }) {
-                    Text(if (semesterStart == null) "设置学期起始日" else "修改学期起始日")
+                if (semesterStart != null) {
+                    val w = Dates.teachingWeek(semesterStart)
+                    Text(
+                        "按今天推算:现在是第 ${w ?: 0} 周",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Row {
+                    TextButton(onClick = { pickSemester = true }) {
+                        Text(if (semesterStart == null) "选择起始日" else "修改起始日")
+                    }
+                    TextButton(onClick = { pickCurrentWeek = true }) { Text("按“现在是第几周”校准") }
                 }
             }
 
-            SectionCard("教务账号(自动获取课表)") {
+            SectionCard("教务账号(自动登录)") {
                 Text(
-                    if (account.isNullOrBlank()) "未配置(仍可用内置浏览器登录)" else "已配置:学号 ****" + account!!.takeLast(4),
+                    if (account.isNullOrBlank()) "未配置" else "已配置:学号 ****" + account!!.takeLast(4),
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    "配置后,课表页点「自动获取」会先尝试用账号密码自动登录统一身份认证;" +
-                        "若本次登录被要求图形验证码,会自动改用「内置浏览器」的登录会话。\n" +
-                        "密码经 Android Keystore 加密后仅存本机,不写日志、不上传,可随时清除。",
+                    "配置后,内置浏览器一打开学校统一身份认证登录页,就会**自动填入**学号与密码" +
+                        "(可另开自动提交,一次登录到底)。\n" +
+                        "密码经 Android Keystore 加密后仅存本机,不写日志、不上传,可随时清除。\n" +
+                        "注意:自动提交在同一个登录页只提交一次,失败不重试 —— 学校规定连续失败 5 次会锁定账号。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Switch(
+                        checked = autoFillLogin,
+                        onCheckedChange = { scope.launch { repo.setAutoFillLogin(it) } }
+                    )
+                    Text("自动填入账号密码", style = MaterialTheme.typography.bodyMedium)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Switch(
+                        checked = autoSubmitLogin,
+                        onCheckedChange = { scope.launch { repo.setAutoSubmitLogin(it) } }
+                    )
+                    Text("自动提交登录(需先填好账号密码)", style = MaterialTheme.typography.bodyMedium)
+                }
                 Row {
                     TextButton(onClick = { showCredDialog = true }) {
                         Text(if (account.isNullOrBlank()) "配置账号" else "修改账号")
@@ -247,6 +279,16 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
         )
     }
 
+    if (pickCurrentWeek) {
+        CurrentWeekDialog(
+            onDismiss = { pickCurrentWeek = false },
+            onPick = { n ->
+                scope.launch { repo.calibrateByCurrentWeek(n) }
+                pickCurrentWeek = false
+            }
+        )
+    }
+
     if (pickSectionTimes) {
         SectionTimesDialog(
             initial = sectionTimes,
@@ -317,8 +359,53 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
 }
 
 /**
+ * 按"现在是第几周"校准学期起始日。
+ * 用户通常只知道"这周是第 9 周",比起让他回忆开学那天,这样输入更省事且同样准确。
+ */
+@Composable
+private fun CurrentWeekDialog(
+    onDismiss: () -> Unit,
+    onPick: (Int) -> Unit
+) {
+    var text by remember { mutableStateOf("1") }
+    val n = text.trim().toIntOrNull()?.takeIf { it in 1..30 }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("按“现在是第几周”校准") },
+        text = {
+            Column {
+                Text(
+                    "填本周是第几教学周,应用会反推第 1 周周一并据此自动定位周次。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.material3.OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.filter { c -> c.isDigit() }.take(2) },
+                    label = { Text("本周是第几周") },
+                    singleLine = true,
+                    isError = n == null
+                )
+                if (n == null) {
+                    Text(
+                        "请输入 1~30 之间的整数",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = n != null, onClick = { n?.let(onPick) }) { Text("校准") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/**
  * 节次时间表编辑:一行一节,`节次 开始-结束`(如 `1 08:00-08:45`)。
- * 用多行文本而不是 22×2 输入框:输入更少、键盘更好用,也便于整表复制粘贴。
+ * 支持按"首节开始 / 单节时长 / 课间休息"一键生成初稿,生成结果仍可逐节修改。
  */
 @Composable
 private fun SectionTimesDialog(
@@ -328,27 +415,82 @@ private fun SectionTimesDialog(
 ) {
     var text by remember {
         mutableStateOf(
-            com.wmu.keban.util.SectionTimes.toLines(initial).ifBlank { "" }
+            com.wmu.keban.util.SectionTimes.toLines(initial).ifBlank {
+                // 未设置过就先给一份按默认参数的初稿,方便直接改;保存前都只是文本框内容
+                com.wmu.keban.util.SectionTimes.toLines(
+                    com.wmu.keban.util.SectionTimes.generate()
+                )
+            }
         )
+    }
+    var firstStart by remember {
+        mutableStateOf(com.wmu.keban.util.SectionTimes.DEFAULT_FIRST_START)
+    }
+    var duration by remember {
+        mutableStateOf(com.wmu.keban.util.SectionTimes.DEFAULT_DURATION_MIN.toString())
+    }
+    var breakMin by remember {
+        mutableStateOf(com.wmu.keban.util.SectionTimes.DEFAULT_BREAK_MIN.toString())
     }
     val parsed = com.wmu.keban.util.SectionTimes.fromLines(text)
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("节次时间表") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
-                    "每行一节,格式:`节次 开始-结束`,例如\n" +
-                        "1 08:00-08:45\n2 08:55-09:40\n" +
-                        "只需填你用得上的节次;空行与 # 开头的行会被忽略。",
+                    "一键生成:按“第 1 节开始时间 + 单节时长 + 课间休息”推算(默认 08:00 / 45 分钟 / 5 分钟)。\n" +
+                        "生成结果是可编辑的初稿,请按学校实际作息修正(如上午/下午大课间的差异)。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = firstStart,
+                        onValueChange = { firstStart = it.take(5) },
+                        label = { Text("第1节开始") },
+                        singleLine = true,
+                        modifier = Modifier.width(108.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = duration,
+                        onValueChange = { duration = it.filter { c -> c.isDigit() }.take(3) },
+                        label = { Text("分钟") },
+                        singleLine = true,
+                        modifier = Modifier.width(76.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = breakMin,
+                        onValueChange = { breakMin = it.filter { c -> c.isDigit() }.take(3) },
+                        label = { Text("休息") },
+                        singleLine = true,
+                        modifier = Modifier.width(76.dp)
+                    )
+                }
+                TextButton(onClick = {
+                    val table = com.wmu.keban.util.SectionTimes.generate(
+                        firstStart = firstStart,
+                        durationMinutes = duration.toIntOrNull() ?: 0,
+                        breakMinutes = breakMin.toIntOrNull() ?: 0
+                    )
+                    if (table.isNotEmpty()) text = com.wmu.keban.util.SectionTimes.toLines(table)
+                }) { Text("按此生成到文本框") }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "每行一节,格式:`节次 开始-结束`,空行与 # 开头的行会被忽略。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(6.dp))
                 androidx.compose.material3.OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
-                    modifier = Modifier.fillMaxWidth().height(200.dp),
+                    modifier = Modifier.fillMaxWidth().height(190.dp),
                     placeholder = { Text("1 08:00-08:45") },
                     singleLine = false
                 )

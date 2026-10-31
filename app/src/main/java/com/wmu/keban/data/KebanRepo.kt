@@ -76,6 +76,32 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
     }
 
     /**
+     * 按"现在是第几周"校准学期起始日:
+     * 起始日 = 本周一 - (week - 1) * 7 天。用户只需知道自己现在在第几周。
+     */
+    suspend fun calibrateByCurrentWeek(week: Int, today: LocalDate = LocalDate.now()) {
+        val thisMonday = today.minusDays((today.dayOfWeek.value - 1).toLong())
+        val start = thisMonday.minusDays(((week.coerceAtLeast(1) - 1) * 7).toLong())
+        setSemesterStart(start.toEpochDay())
+    }
+
+    /** 登录页自动填入账号密码(默认开) */
+    val autoFillLogin: Flow<Boolean> = db.settingDao().observe(KEY_AUTOFILL_LOGIN)
+        .map { it?.value != "0" }
+
+    /** 登录页自动提交登录(默认开;实现里做了一次性保护,避免失败反复提交导致账号锁定) */
+    val autoSubmitLogin: Flow<Boolean> = db.settingDao().observe(KEY_AUTOSUBMIT_LOGIN)
+        .map { it?.value != "0" }
+
+    suspend fun setAutoFillLogin(enabled: Boolean) {
+        db.settingDao().put(Setting(KEY_AUTOFILL_LOGIN, if (enabled) "1" else "0"))
+    }
+
+    suspend fun setAutoSubmitLogin(enabled: Boolean) {
+        db.settingDao().put(Setting(KEY_AUTOSUBMIT_LOGIN, if (enabled) "1" else "0"))
+    }
+
+    /**
      * 示例数据只在首次启动写入一次(用 settings 里的标记位记录),
      * 避免"用户删掉示例后重启又被写回来"的行为缺陷。
      * 示例数据 isSample = true,UI 明确标注,可删除;已有真实数据时不再写入。
@@ -103,6 +129,10 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
         const val KEY_SAMPLE_SEEDED = "sample_seeded"
         /** 节次时间表,格式 `1=08:00-08:45;2=08:55-09:40` */
         const val KEY_SECTION_TIMES = "section_times"
+        /** 登录页自动填入账号密码 */
+        const val KEY_AUTOFILL_LOGIN = "autofill_login"
+        /** 登录页自动提交登录 */
+        const val KEY_AUTOSUBMIT_LOGIN = "autosubmit_login"
     }
 }
 

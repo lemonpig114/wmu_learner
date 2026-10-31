@@ -126,8 +126,14 @@ fun TimetableScreen(onOpenBrowser: () -> Unit = {}) {
 
     val courses by repo.coursesWithSlots.collectAsState(initial = emptyList())
     val semesterStart by kebanRepo.semesterStart.collectAsState(initial = null)
+    val sectionTimes by kebanRepo.sectionTimes.collectAsState(initial = emptyMap())
 
-    var week by remember { mutableStateOf<Int?>(Dates.teachingWeek(semesterStart) ?: 1) }
+    // 教学周:进入页面时按"今天"自动校准;学期起始日变化时重新校准
+    var week by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(semesterStart) {
+        week = Dates.teachingWeek(semesterStart)?.takeIf { it > 0 }
+            ?: if (semesterStart == null) null else 1
+    }
     var session by remember { mutableStateOf<ImportSession?>(null) }
     var parsing by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
@@ -419,7 +425,14 @@ fun TimetableScreen(onOpenBrowser: () -> Unit = {}) {
                     courseCount = courses.size,
                     onShowAll = { week = null }
                 )
-                WeekGrid(courses = courses, week = week, onCourseClick = { detailCourse = it })
+                WeekGrid(
+                    courses = courses,
+                    week = week,
+                    sectionTimes = sectionTimes,
+                    semesterUncalibrated = semesterStart == null,
+                    onCourseClick = { detailCourse = it }
+                )
+
             }
         }
     }
@@ -633,6 +646,8 @@ private fun WeekSelector(
 private fun WeekGrid(
     courses: List<CourseWithSlots>,
     week: Int?,
+    sectionTimes: com.wmu.keban.util.SectionTimes.Table,
+    semesterUncalibrated: Boolean,
     onCourseClick: (CourseWithSlots) -> Unit
 ) {
     data class CellItem(val cws: CourseWithSlots, val slot: CourseSlot)
@@ -660,6 +675,15 @@ private fun WeekGrid(
         val todayDow = remember { LocalDate.now().dayOfWeek.value } // 1=周一 .. 7=周日
 
         // 星期表头(今日高亮);7 天按权重平分宽度,保证同屏不横滑
+        if (semesterUncalibrated) {
+            Text(
+                "教学周未校准:请到「我的」→「学期设置」按“现在是第几周”一键校准," +
+                    "之后本页会自动定位到当前周。当前显示全部周次。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+            )
+        }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -696,12 +720,23 @@ private fun WeekGrid(
         ) {
             (1..maxSection).forEach { s ->
                 Row(Modifier.fillMaxWidth().height(ROW_H)) {
+                    // 节次列:节序号 + 该节开始时间(仅当设置了节次时间;未设置不猜)
                     Box(Modifier.width(SEC_W), contentAlignment = Alignment.Center) {
-                        Text(
-                            "$s",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "$s",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            sectionTimes[s]?.first?.let { t ->
+                                Text(
+                                    t,
+                                    fontSize = 8.sp,
+                                    lineHeight = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                                )
+                            }
+                        }
                     }
                     (1..7).forEach { d ->
                         val covering = visible.filter {

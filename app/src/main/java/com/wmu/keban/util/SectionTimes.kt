@@ -76,4 +76,54 @@ object SectionTimes {
     /** 节次文本:"第1-2节" / "第3节" */
     fun sectionText(startSection: Int, endSection: Int): String =
         if (startSection == endSection) "第${startSection}节" else "第${startSection}-${endSection}节"
+
+    // ───────────────────────── 按参数生成 ─────────────────────────
+
+    /** 默认参数(可由用户在界面修改):第 1 节 08:00 开始,每节 45 分钟,课间休息 5 分钟 */
+    const val DEFAULT_FIRST_START = "08:00"
+    const val DEFAULT_DURATION_MIN = 45
+    const val DEFAULT_BREAK_MIN = 5
+
+    private fun toMinutes(hhmm: String): Int? {
+        val t = hhmm.trim()
+        if (!isTime(t)) return null
+        val h = t.substringBefore(':').toInt()
+        val m = t.substringAfter(':').toInt()
+        if (h !in 0..23 || m !in 0..59) return null
+        return h * 60 + m
+    }
+
+    private fun fmt(minutes: Int): String {
+        val norm = ((minutes % 1440) + 1440) % 1440
+        return "%02d:%02d".format(norm / 60, norm % 60)
+    }
+
+    /**
+     * 按"首节开始时间 + 单节时长 + 课间休息"推算节次时间表。
+     *
+     * 注意:这是**按用户给定的参数推算**的默认值,不是对学校实际作息的假设 ——
+     * 生成结果会填进可编辑的文本框,用户可逐节修正后再保存。
+     * 参数非法(时间格式错误/时长非正)时返回空表,不产出半成品。
+     * **不跨午夜**:某节结束时间会超过 24:00 时即停止生成(否则会出现 01:30 这种没意义的节次),
+     * 因此实际生成节数可能少于请求的节数 —— 界面会如实显示生成到第几节。
+     */
+    fun generate(
+        totalSections: Int = MAX_SECTION,
+        firstStart: String = DEFAULT_FIRST_START,
+        durationMinutes: Int = DEFAULT_DURATION_MIN,
+        breakMinutes: Int = DEFAULT_BREAK_MIN
+    ): Table {
+        val start = toMinutes(firstStart) ?: return emptyMap()
+        if (durationMinutes <= 0 || breakMinutes < 0) return emptyMap()
+        val n = totalSections.coerceIn(1, MAX_SECTION)
+        val out = linkedMapOf<Int, Pair<String, String>>()
+        var cur = start
+        for (i in 1..n) {
+            val end = cur + durationMinutes
+            if (end > 1440) break // 不跨午夜
+            out[i] = fmt(cur) to fmt(end)
+            cur = end + breakMinutes
+        }
+        return out
+    }
 }

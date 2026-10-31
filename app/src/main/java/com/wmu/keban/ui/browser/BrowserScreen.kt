@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -30,6 +31,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,8 +42,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.wmu.keban.data.Graph
 import com.wmu.keban.data.ImportHandoff
 import com.wmu.keban.jwxt.JwxtClient
+import com.wmu.keban.security.SecureStore
 import com.wmu.keban.ui.common.EmptyHint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -65,6 +69,9 @@ private const val JWXT_TIMETABLE_PAGE =
 private const val DESKTOP_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
+/** 整个进程内自动提交登录的次数上限(防止密码错误时反复提交导致账号锁定) */
+private const val MAX_AUTO_SUBMIT = 2
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,6 +87,10 @@ fun BrowserScreen(onSwitchToTimetable: () -> Unit = {}) {
     var browserMessage by remember { mutableStateOf<String?>(null) }
     var currentShownUrl by remember { mutableStateOf(JWXT_TIMETABLE_PAGE) }
     var diagText by remember { mutableStateOf<String?>(null) }
+    val autoFillEnabled by Graph.repo().autoFillLogin.collectAsState(initial = true)
+    val autoSubmitEnabled by Graph.repo().autoSubmitLogin.collectAsState(initial = true)
+    var autoSubmitAttempts by remember { mutableStateOf(0) }
+    var showMenu by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var showGuide by remember { mutableStateOf(false) }
     var autoRun by remember { mutableStateOf(false) }
@@ -570,6 +581,92 @@ fun BrowserScreen(onSwitchToTimetable: () -> Unit = {}) {
     }
 
 
+    /**
+     * 登录页自动填入账号密码(可选自动提交)。
+     *
+     * 只在**学校统一身份认证主机**上执行;凭据经 JSON 转义后传入 JS,不会写进任何日志或诊断。
+     * 防锁定保护:同一个页面加载只提交一次;整个进程最多自动提交 [MAX_AUTO_SUBMIT] 次,
+     * 失败不重试(学校规定连续失败 5 次锁定账号)。
+     * 选择器不做硬编码猜测:按"第一个文本框 + 第一个密码框 + 其所属表单"定位,
+     * 并兼容登录表单位于同源 iframe 内的情况(实测该页表单在 iframe 里)。
+     */
+    fun autoFillLoginPage(w: WebView, url: String) {
+        if (!url.contains(JwxtClient.AUTH_SERVER_HOST)) return
+        if (!autoFillEnabled) return
+        val user = SecureStore.load(ctx, SecureStore.KIND_ACCOUNT)
+        val pwd = SecureStore.load(ctx, SecureStore.KIND_PASSWORD)
+        if (user.isNullOrBlank() || pwd.isNullOrBlank()) return
+        if (autoSubmitAttempts >= MAX_AUTO_SUBMIT) return
+        val allowSubmit = autoSubmitEnabled
+        val userLit = org.json.JSONObject.quote(user)
+        val pwdLit = org.json.JSONObject.quote(pwd)
+        val js = """
+            (function(){
+              try{
+                function findDoc(d){
+                  var pwd = d.querySelector('input[type=password]');
+                  if(!pwd) return null;
+                  return {doc:d, pwd:pwd, form:pwd.form||d};
+                }
+                var hit = findDoc(document);
+                if(!hit){
+                  var fs = document.querySelectorAll('iframe');
+                  for(var i=0;i<fs.length;i++){
+                    try{
+                      var cd = fs[i].contentDocument;
+                      if(cd){ var h = findDoc(cd); if(h){ hit = h; break; } }
+                    }catch(e){}
+                  }
+                }
+                if(!hit) return JSON.stringify({filled:false, reason:'未找到登录表单'});
+                var form = hit.form;
+                var userInput = form.querySelector('input[type=text],input[type=tel],input:not([type])');
+                if(!userInput) return JSON.stringify({filled:false, reason:'未找到账号输入框'});
+                var captcha = hit.doc.querySelector('#captchaDiv input,#captchaParent input,input[name*=aptcha],input[id*=aptcha]');
+                var captchaVisible = false;
+                if(captcha){
+                  var box = captcha.closest('#captchaParent') || captcha;
+                  var st = window.getComputedStyle ? null : null;
+                  try{ captchaVisible = !!(box.offsetParent !== null); }catch(e){}
+                }
+                var setVal = function(el,v){
+                  el.value = v;
+                  try{
+                    el.dispatchEvent(new Event('input',{bubbles:true}));
+                    el.dispatchEvent(new Event('change',{bubbles:true}));
+                  }catch(e){}
+                };
+                setVal(userInput, $userLit);
+                setVal(hit.pwd, $pwdLit);
+                if(!$allowSubmit) return JSON.stringify({filled:true, submitted:false, captcha:captchaVisible});
+                if(captchaVisible) return JSON.stringify({filled:true, submitted:false, captcha:true});
+                var btn = form.querySelector('button[type=submit],input[type=submit],.btn-primary,button');
+                if(!btn) return JSON.stringify({filled:true, submitted:false, reason:'未找到登录按钮'});
+                window.__kbAutoSubmitted = (window.__kbAutoSubmitted||0) + 1;
+                if(window.__kbAutoSubmitted > 1) return JSON.stringify({filled:true, submitted:false, reason:'本页已提交过'});
+                btn.click();
+                return JSON.stringify({filled:true, submitted:true, captcha:false});
+              }catch(e){ return JSON.stringify({filled:false, reason:'填写异常:'+e}); }
+            })()
+        """.trimIndent()
+        w.evaluateJavascript(js) { raw ->
+            val res = runCatching {
+                org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
+            }.getOrNull() ?: return@evaluateJavascript
+            val filled = res.optBoolean("filled", false)
+            val submitted = res.optBoolean("submitted", false)
+            if (submitted) autoSubmitAttempts++
+            browserMessage = when {
+                submitted -> "已自动填入并提交登录(共已自动提交 $autoSubmitAttempts/$MAX_AUTO_SUBMIT 次)"
+                filled && res.optBoolean("captcha", false) ->
+                    "已自动填入账号密码;本次需要图形验证码,请手动输入后点登录"
+                filled -> "已自动填入账号密码" +
+                    (res.optString("reason").takeIf { it.isNotBlank() }?.let { "($it)" } ?: ",请点登录")
+                else -> "未能自动填入:${res.optString("reason").ifBlank { "未知原因" }}"
+            }
+        }
+    }
+
     /** 拦截网页下载:只接受 PDF,取出后交给课表页导入(复用 WebView 的登录会话) */
     fun handleDownload(url: String, mime: String?, disposition: String?) {
         // 一键流程已在处理:这里不再重复发起,避免出现"先失败后成功"的两条提示
@@ -683,60 +780,98 @@ fun BrowserScreen(onSwitchToTimetable: () -> Unit = {}) {
                 ) { Text("打开") }
             }
 
+            // 简化后的工具栏:一个主按钮 + 一个菜单(把诊断类功能收起来)
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = { webView?.goBack() }, enabled = canGoBack) { Text("‹ 后退") }
+                TextButton(onClick = { webView?.goBack() }, enabled = canGoBack) { Text("‹") }
                 TextButton(onClick = { webView?.reload() }) { Text("刷新") }
-                TextButton(onClick = { fetchWithSession() }) { Text("获取课表") }
-                TextButton(onClick = { selfCheck() }) { Text("自检") }
-                TextButton(onClick = {
-                    uaMode = (uaMode + 1) % 3
-                    webView?.let { w ->
-                        w.settings.userAgentString =
-                            uaFor(uaMode, WebSettings.getDefaultUserAgent(ctx))
-                        w.reload()
+                Button(
+                    onClick = { clickPageExport() },
+                    enabled = !exporting,
+                    modifier = Modifier.weight(1f)
+                ) { Text(if (exporting) "正在导出…" else "一键导出课表") }
+                Spacer(Modifier.width(4.dp))
+                Box {
+                    TextButton(onClick = { showMenu = true }) { Text("更多 ▾") }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false }
+                    ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("导入指引") },
+                            onClick = { showMenu = false; showGuide = true }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("开发教务课表页") },
+                            onClick = {
+                                showMenu = false
+                                currentUrl = JWXT_TIMETABLE_PAGE
+                                webView?.loadUrl(JWXT_TIMETABLE_PAGE)
+                                lastRequested = JWXT_TIMETABLE_PAGE
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("按会话直接取 PDF(备用)") },
+                            onClick = { showMenu = false; fetchWithSession() }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("UA:${uaLabels[uaMode].removePrefix("UA:")}(点击切换)") },
+                            onClick = {
+                                uaMode = (uaMode + 1) % 3
+                                webView?.let { w ->
+                                    w.settings.userAgentString =
+                                        uaFor(uaMode, WebSettings.getDefaultUserAgent(ctx))
+                                    w.reload()
+                                }
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("简版登录页(遇到白屏时试)") },
+                            onClick = {
+                                showMenu = false
+                                val uri = android.net.Uri.parse(currentShownUrl)
+                                if (uri.scheme == "https" && uri.host == JwxtClient.AUTH_SERVER_HOST &&
+                                    uri.path == "/authserver/login"
+                                ) {
+                                    val fb = uri.buildUpon().clearQuery()
+                                    uri.queryParameterNames.filter { it != "dev" }.forEach { key ->
+                                        uri.getQueryParameters(key).forEach { v ->
+                                            fb.appendQueryParameter(key, v)
+                                        }
+                                    }
+                                    currentUrl = fb.appendQueryParameter("dev", "true").build().toString()
+                                    webView?.loadUrl(currentUrl)
+                                    lastRequested = currentUrl
+                                } else {
+                                    browserMessage = "请先到达统一身份认证登录页,再切换简版登录"
+                                }
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("自检与诊断") },
+                            onClick = { showMenu = false; selfCheck() }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("取课表数据(探测字段)") },
+                            onClick = { showMenu = false; probeTimetableData() }
+                        )
                     }
-                }) { Text(uaLabels[uaMode]) }
+                }
             }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 让页面自己走它的导出流程:点了之后由 DownloadListener 或导航记录接管(不猜接口)
-                TextButton(onClick = { clickPageExport() }) { Text("一键导出课表") }
-                TextButton(onClick = { probeTimetableData() }) { Text("取课表数据") }
-                TextButton(onClick = { showGuide = true }) { Text("导入指引") }
-            }
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = {
-                    val uri = android.net.Uri.parse(currentShownUrl)
-                    if (uri.scheme == "https" && uri.host == JwxtClient.AUTH_SERVER_HOST &&
-                        uri.path == "/authserver/login") {
-                        val fallback = uri.buildUpon().clearQuery()
-                        uri.queryParameterNames.filter { it != "dev" }.forEach { key ->
-                            uri.getQueryParameters(key).forEach { fallback.appendQueryParameter(key, it) }
-                        }
-                        currentUrl = fallback.appendQueryParameter("dev", "true").build().toString()
-                        webView?.loadUrl(currentUrl)
-                        lastRequested = currentUrl
-                    } else {
-                        browserMessage = "请先到达统一身份认证登录页，再切换简版登录"
-                    }
-                }) { Text("简版登录") }
                 Text(
-                    currentShownUrl.takeLast(60),
+                    currentShownUrl.takeLast(64),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     modifier = Modifier.weight(1f)
                 )
             }
-
             browserMessage?.let { msg ->
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -814,6 +949,14 @@ fun BrowserScreen(onSwitchToTimetable: () -> Unit = {}) {
                                     sizeAuthFrame(view)
                                     // 教务页装挂钩:用于捕获页面自己发出的导出请求
                                     if ((url ?: "").contains("jwxt.wmu.edu.cn")) installCaptureHooks(view)
+                                    // 登录页自动填入账号密码(可另开自动提交;含防锁定保护)
+                                    if (url != null && url.contains(JwxtClient.AUTH_SERVER_HOST)) {
+                                        // 等 iframe 内的登录表单加载出来再填
+                                        scope.launch {
+                                            delay(700)
+                                            autoFillLoginPage(view, url)
+                                        }
+                                    }
                                     // 一键流程:课表页加载完成后自动开始点击导出
                                     if (autoRun && (url ?: "").contains("xskbcx")) {
                                         autoRun = false
