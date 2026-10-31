@@ -1,14 +1,21 @@
 # 开发进度记录（PROGRESS）
 
-最近更新：2026-10-30（WorkBuddy 接续：第二阶段解析核心完成并提交）
+最近更新：2026-10-31（v0.5.0 已推送 GitHub）
+
+**远程仓库**：<https://github.com/lemonpig114/wmu_learner>（公开，分支 `main`，标签 `phase-1`）
+本机推送方式：Windows 凭据管理器已存 `git:https://github.com`（账号 `lemonpig114`），
+用系统 Git（`D:/Install/Git`，带 GCM）以 `credential.helper=manager` 推送；WorkBuddy 自带 Git 无凭据。
 
 ## 当前范围
 
 课伴 KeBan：面向温州医科大学学生的安卓课程助手。
 - 第一阶段 ✅：四页面、Room 本地待办、内置浏览器、首个可安装 APK、Git 版本管理
-- 第二阶段 ✅：解析核心（真实文件单测）+ 导入流程（选 PDF → 解析 → 预览校正 → 确认保存）+ 周课表网格 + 手动增删改；剩余细节：节次时间表设置、「清空课表」入口、待办项转为周课表着色优化
-- 第三阶段 🔄：教务入口登录与课表 PDF 下载 —— **统一身份认证(SSO)自动登录 + 课表 PDF 自动获取已实现**(实测确认首次登录无需验证码),待真机用真实账号验证;入口:`jwxt.wmu.edu.cn/sso/jziotlogin` → `authserver.wmu.edu.cn/authserver/login`
-- 第四阶段 ☐：真机验证与交付
+- 第二阶段 ✅：解析核心（真实文件单测）+ 导入流程（选 PDF → 解析 → 预览校正 → 确认保存）+ 周课表网格 + 手动增删改 + 节次时间表 + 清空课表入口
+- 第三阶段 ✅：教务统一身份认证登录（自动填入账号密码）+ **课表 PDF 一键获取**（用户真机确认成功）
+  · 实测导出接口：`POST /jwglxt/kbcx/xskbcx_cxXsShcPdf.html`
+  · 登录链路：`jwxt.wmu.edu.cn/sso/jziotlogin` → `authserver.wmu.edu.cn/authserver/login`（登录表单在同源 iframe 内）
+- 温医大特供默认值 ✅：学期起始日 9 月 7 日、节次作息第 1~17 节（均由用户提供/核对，并用单测锁死）
+- 第四阶段 🔄：真机验证与交付（已真机跑通导入全流程；自动登录与本周次定位待你实测）
 - 不在本期：学习通 / 知到 / 在浙学接入、AI 通知
 
 ## Git 记录

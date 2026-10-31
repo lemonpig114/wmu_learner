@@ -19,3 +19,13 @@
 | 02 | 2026-10-30 | PDF 课表导入(解析→预览校正→保存→周课表) | 🔄 进行中:解析核心+真实文件单测已通过;导入 UI 待做 | [2026-10-30-阶段02-PDF解析核心.md](2026-10-30-阶段02-PDF解析核心.md) |
 | 03 | 待定 | 教务入口登录与课表 PDF 下载(入口已确认) | 未开始 | 待建 |
 | 04 | 待定 | 真机验证与交付 | 未开始 | 待建 |
+
+## 远程仓库（2026-10-31）
+
+- **GitHub**: <https://github.com/lemonpig114/wmu_learner>（公开）
+- 首个阶段提交带标签 `phase-1`，方便回退
+- 提交粒度：每个"编译通过 + 可验证"的阶段单独提交，提交说明写清完成内容、验证方式与未验证项
+- 未入库内容（合规）:个人课表 PDF、账号密码、Cookie、Keystore、`local.properties`、构建产物与 APK、
+  参考仓库副本（`.analysis-local/`）、Codex 真机检查截图
+- 推送环境记录:本机 Windows 凭据管理器已存 `git:https://github.com`(账号 `lemonpig114`);
+  WorkBuddy 自带 Git 无凭据助手,故推送使用系统 Git(`D:/Install/Git`,自带 GCM)配 `credential.helper=manager`
