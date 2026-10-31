@@ -48,7 +48,9 @@ import java.time.ZoneId
 fun ProfileScreen(onOpenBrowser: () -> Unit) {
     val repo = Graph.repo()
     val semesterStart by repo.semesterStart.collectAsState(initial = null)
+    val semesterStartCustomized by repo.semesterStartCustomized.collectAsState(initial = false)
     val sectionTimes by repo.sectionTimes.collectAsState(initial = emptyMap())
+    val sectionTimesCustomized by repo.sectionTimesCustomized.collectAsState(initial = false)
     val autoFillLogin by repo.autoFillLogin.collectAsState(initial = true)
     val autoSubmitLogin by repo.autoSubmitLogin.collectAsState(initial = true)
     val courseCount by Graph.timetableRepo().coursesWithSlots
@@ -79,11 +81,13 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
         ) {
             SectionCard("学期设置") {
                 Text(
-                    "学期起始日(第 1 周周一):" + (semesterStart?.let { Dates.dateOnly(it) } ?: "未设置"),
+                    "学期起始日(第 1 周周一):" + (semesterStart?.let { Dates.dateOnly(it) } ?: "未设置") +
+                        if (!semesterStartCustomized) "(温医大默认 9 月 7 日)" else "(已自定义)",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    "设置后,「今天」和「课表」页都会按今天的日期自动定位到当前教学周。",
+                    "默认值 9 月 7 日开箱即用(不需要先点任何按钮);「今天」和「课表」页会按今天的日期" +
+                        "自动定位到当前教学周。若与实际情况不符,可在这里改。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -96,9 +100,7 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
                     )
                 }
                 Row {
-                    TextButton(onClick = { pickSemester = true }) {
-                        Text(if (semesterStart == null) "选择起始日" else "修改起始日")
-                    }
+                    TextButton(onClick = { pickSemester = true }) { Text("修改起始日") }
                     TextButton(onClick = { pickCurrentWeek = true }) { Text("按“现在是第几周”校准") }
                 }
             }
@@ -162,17 +164,23 @@ fun ProfileScreen(onOpenBrowser: () -> Unit) {
 
             SectionCard("节次时间表") {
                 Text(
-                    if (sectionTimes.isEmpty()) "未设置" else "已设置 ${sectionTimes.size} 个节次",
+                    when {
+                        !sectionTimesCustomized ->
+                            "温医大默认作息:已设置 ${sectionTimes.size} 个节次(开箱即用,未自定义)"
+                        sectionTimes.isEmpty() -> "未设置(已清空自定义值)"
+                        else -> "已自定义 ${sectionTimes.size} 个节次"
+                    },
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    "课表 PDF 只给出节次(如 1-2 节),不含具体钟点;填写后「今天」页会显示上课时间。\n" +
-                        "未填写的节次只显示节次,不会猜测时间。",
+                    "默认作息:上午/下午每节 40 分钟、节间休息 5 分钟(第 2→3 节之间 15 分钟,第 7→8 节间隔 10 分钟);" +
+                        "晚间每节 35 分钟、休息 5 分钟。课表 PDF 只给节次区间,这里的钟点用于在课表与「今天」页显示时间。\n" +
+                        "第 18~22 节默认未设置(未提供,不臆测),需要时可自行补上。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 TextButton(onClick = { pickSectionTimes = true }) {
-                    Text(if (sectionTimes.isEmpty()) "设置节次时间" else "修改节次时间")
+                    Text(if (sectionTimesCustomized) "修改节次时间" else "查看/修改节次时间")
                 }
             }
 

@@ -53,9 +53,20 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
 
     suspend fun deleteTask(task: TaskItem) = db.taskDao().delete(task)
 
-    /** 学期起始日(epochDay);null = 未设置 */
-    val semesterStart: Flow<Long?> =
-        db.settingDao().observe(KEY_SEMESTER_START).map { it?.value?.toLongOrNull() }
+    /**
+     * 学期起始日(第 1 周周一,epochDay)。
+     * 用户从未设置过时,**直接用温医大暂定默认值 9 月 7 日**(不需要点任何按钮即生效);
+     * 用户在「我的」改过则用用户的值。
+     */
+    val semesterStart: Flow<Long?> = db.settingDao().observe(KEY_SEMESTER_START)
+        .map {
+            it?.value?.toLongOrNull()
+                ?: com.wmu.keban.util.Dates.defaultSemesterStart().toEpochDay()
+        }
+
+    /** 是否已由用户自定义过学期起始日(界面文案用) */
+    val semesterStartCustomized: Flow<Boolean> =
+        db.settingDao().observe(KEY_SEMESTER_START).map { it != null }
 
     suspend fun setSemesterStart(epochDay: Long) {
         db.settingDao().put(Setting(KEY_SEMESTER_START, epochDay.toString()))
@@ -63,11 +74,18 @@ class KebanRepo internal constructor(private val db: AppDatabase) {
 
     /**
      * 节次时间表(第 n 节 → 开始/结束钟点)。
-     * 未设置过即为空表 —— 界面据此显示"时间未设置",不猜测具体钟点。
+     * 从未设置过 ⇒ 用 [com.wmu.keban.util.SectionTimes.WMU_DEFAULT](温医大默认作息,开箱即用);
+     * 用户在「我的」保存过(即使保存成空表)⇒ 以用户的为准,不被默认值覆盖。
      */
     val sectionTimes: Flow<com.wmu.keban.util.SectionTimes.Table> =
-        db.settingDao().observe(KEY_SECTION_TIMES)
-            .map { com.wmu.keban.util.SectionTimes.parse(it?.value) }
+        db.settingDao().observe(KEY_SECTION_TIMES).map {
+            if (it == null) com.wmu.keban.util.SectionTimes.WMU_DEFAULT
+            else com.wmu.keban.util.SectionTimes.parse(it.value)
+        }
+
+    /** 是否已由用户自定义过节次时间(界面文案用) */
+    val sectionTimesCustomized: Flow<Boolean> =
+        db.settingDao().observe(KEY_SECTION_TIMES).map { it != null }
 
     suspend fun setSectionTimes(table: com.wmu.keban.util.SectionTimes.Table) {
         db.settingDao().put(

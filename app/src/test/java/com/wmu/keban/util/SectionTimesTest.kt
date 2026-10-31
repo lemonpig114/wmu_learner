@@ -86,12 +86,21 @@ class SectionTimesTest {
     // ───────── 按参数生成(默认 08:00 开始 / 45 分钟一节 / 休息 5 分钟) ─────────
 
     @Test
-    fun `generate 默认参数生成连续节次`() {
+    fun `generate 默认参数生成连续节次(08-00 开始 每节40分钟 休息5分钟)`() {
         val t = SectionTimes.generate(totalSections = 4)
-        assertEquals("08:00" to "08:45", t[1])
-        assertEquals("08:50" to "09:35", t[2]) // 45 + 5 休息
-        assertEquals("09:40" to "10:25", t[3])
-        assertEquals("10:30" to "11:15", t[4])
+        assertEquals("08:00" to "08:40", t[1])
+        assertEquals("08:45" to "09:25", t[2]) // 40 + 5 休息
+        assertEquals("09:30" to "10:10", t[3])
+        assertEquals("10:15" to "10:55", t[4])
+    }
+
+    @Test
+    fun `generate 是等间隔的通用算法 与 WMU_DEFAULT 的大课间不同`() {
+        // 通用生成器按固定间隔推进;学校实际在第 2→3 节有 15 分钟大课间,
+        // 因此 WMU_DEFAULT 才是默认值,生成器只作自定义参数的辅助。
+        val t = SectionTimes.generate(totalSections = 6)
+        assertEquals("等间隔生成:第3节应紧接 5 分钟休息", "09:30", t[3]!!.first)
+        assertEquals("学校实际:第3节 09:40", "09:40", SectionTimes.WMU_DEFAULT[3]!!.first)
     }
 
     @Test
@@ -127,13 +136,65 @@ class SectionTimesTest {
         assertTrue("最后一节结束时间不应在凌晨:${last.second}", last.second <= "23:59")
     }
 
+    // ───────── 温医大默认作息:用户给出的真实锚点必须精确复现 ─────────
+
     @Test
-    fun `generate 结果每节开始早于结束且均为合法时间`() {
-        val t = SectionTimes.generate(totalSections = 22, firstStart = "08:00")
+    fun `WMU_DEFAULT 精确复现用户给出的 9 条真实作息锚点`() {
+        val t = SectionTimes.WMU_DEFAULT
+        assertEquals("1-2 节", "08:00-09:25", SectionTimes.range(t, 1, 2))
+        assertEquals("3-4 节", "09:40-11:05", SectionTimes.range(t, 3, 4))
+        assertEquals("3-5 节", "09:40-11:50", SectionTimes.range(t, 3, 5))
+        assertEquals("3-6 节", "09:40-12:35", SectionTimes.range(t, 3, 6))
+        assertEquals("8-9 节", "13:30-14:55", SectionTimes.range(t, 8, 9))
+        assertEquals("8-10 节", "13:30-15:40", SectionTimes.range(t, 8, 10))
+        assertEquals("11-13 节", "15:45-17:55", SectionTimes.range(t, 11, 13))
+        assertEquals("12-13 节", "16:30-17:55", SectionTimes.range(t, 12, 13))
+        assertEquals("14-17 节", "18:20-20:55", SectionTimes.range(t, 14, 17))
+    }
+
+    @Test
+    fun `WMU_DEFAULT 覆盖 1 到 17 节且序号连续`() {
+        val t = SectionTimes.WMU_DEFAULT
+        assertEquals((1..17).toList(), t.keys.toList())
         t.forEach { (_, se) ->
             assertTrue("时间格式应为 HH:mm:${se.first}", SectionTimes.isTime(se.first))
-            assertTrue("时间格式应为 HH:mm:${se.second}", SectionTimes.isTime(se.second))
-            assertTrue("第几节开始应早于结束:${se.first}->${se.second}", se.first < se.second)
+            assertTrue("每节开始应早于结束:${se.first}->${se.second}", se.first < se.second)
+        }
+    }
+
+    @Test
+    fun `WMU_DEFAULT 的节间休息符合实测规则`() {
+        val t = SectionTimes.WMU_DEFAULT
+        fun gap(a: Int, b: Int): Int {
+            val endA = t[a]!!.second
+            val startB = t[b]!!.first
+            fun min(x: String) = x.substringBefore(':').toInt() * 60 + x.substringAfter(':').toInt()
+            return min(startB) - min(endA)
+        }
+        assertEquals("1→2 应为 5 分钟", 5, gap(1, 2))
+        assertEquals("2→3 应为 15 分钟大课间", 15, gap(2, 3))
+        assertEquals("3→4 应为 5 分钟", 5, gap(3, 4))
+        assertEquals("7→8 应为 10 分钟", 10, gap(7, 8))
+        assertEquals("13→14 应为 25 分钟", 25, gap(13, 14))
+    }
+
+    @Test
+    fun `WMU_DEFAULT 上午下午每节 40 分钟 晚间 35 分钟`() {
+        val t = SectionTimes.WMU_DEFAULT
+        fun len(s: Int): Int {
+            fun min(x: String) = x.substringBefore(':').toInt() * 60 + x.substringAfter(':').toInt()
+            return min(t[s]!!.second) - min(t[s]!!.first)
+        }
+        listOf(1, 2, 3, 8, 11, 13).forEach { assertEquals("第 $it 节应为 40 分钟", 40, len(it)) }
+        listOf(14, 15, 16, 17).forEach { assertEquals("第 $it 节应为 35 分钟", 35, len(it)) }
+    }
+
+    @Test
+    fun `WMU_DEFAULT 不包含未提供的 18 到 22 节`() {
+        val t = SectionTimes.WMU_DEFAULT
+        (18..SectionTimes.MAX_SECTION).forEach {
+            assertNull("第 $it 节未提供,应保持未设置", t[it])
+            assertNull("第 $it 节不应有区间", SectionTimes.range(t, it, it))
         }
     }
 }

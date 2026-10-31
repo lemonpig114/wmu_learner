@@ -64,6 +64,24 @@ object Dates {
         return if (days < 0) 0 else (days / 7 + 1).toInt()
     }
 
+    /**
+     * 温医大特供的**暂定**学期起始日(第 1 周周一):9 月 7 日。
+     *
+     * 仅作为"用户没设置过"时的默认值,可在「我的 → 学期设置」里改。
+     * 取"距今最近的、尚未超过约 30 周的那个 9 月 7 日":
+     * - 若上一学年的 9/7 已过去 30 周以上(学年早已结束),改用下一学年的 9/7,
+     *   此时教学周会算作 0,界面显示"学期尚未开始",而不是给出一个荒唐的周次(如第 44 周)。
+     */
+    fun defaultSemesterStart(today: LocalDate = LocalDate.now()): LocalDate {
+        val thisYear = LocalDate.of(today.year, 9, 7)
+        val candidate = if (thisYear.isAfter(today)) LocalDate.of(today.year - 1, 9, 7) else thisYear
+        return if (ChronoUnit.DAYS.between(candidate, today) > 30L * 7) {
+            LocalDate.of(candidate.year + 1, 9, 7)
+        } else {
+            candidate
+        }
+    }
+
     fun toLocalDateTime(millis: Long): LocalDateTime =
         Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDateTime()
 
